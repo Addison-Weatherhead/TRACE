@@ -1662,6 +1662,7 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
 if __name__ == '__main__':
     print("STARTED RUNNING")
     print(device)
+    # Going to update RNN
     
     print("Started running on ", datetime.now())
     parser = argparse.ArgumentParser(description='Run TNC')
