@@ -882,10 +882,10 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
     ENCODER_TYPE = encoder_type
     
     
-    if not os.path.exists("./DONTCOMMITplots/"):
-        os.mkdir("./DONTCOMMITplots/")
-    if not os.path.exists("./ckpt/"):
-        os.mkdir("./ckpt/")
+    if not os.path.exists("../DONTCOMMITplots/"):
+        os.mkdir("../DONTCOMMITplots/")
+    if not os.path.exists("../ckpt/"):
+        os.mkdir("../ckpt/")
     
     global ECODER_HYPER_PARAMS
     ECODER_HYPER_PARAMS = encoder_hyper_params
@@ -938,24 +938,18 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
             encoder_type=encoder_type, encoder_hyper_params=encoder_hyper_params, 
             pretrain_hyper_params=pretrain_hyper_params, **learn_encoder_hyper_params)
 
-        classifier_hour_encodings_validation_aurocs = []
-        classifier_hour_encodings_validation_auprcs = []
-        classifier_hour_encodings_TEST_aurocs = []
-        classifier_hour_encodings_TEST_auprcs = []
-        classifier_sample_encodings_validation_aurocs = []
-        classifier_sample_encodings_validation_auprcs = []
-        classifier_sample_encodings_TEST_aurocs = []
-        classifier_sample_encodings_TEST_auprcs = []
+        classifier_validation_aurocs = []
+        classifier_validation_auprcs = []
 
         for encoder_cv in range(learn_encoder_hyper_params['n_cross_val_encoder']):
             for classification_cv in range(classification_hyper_params['n_cross_val_classification']):
                 random.seed(123*classification_cv)
-                if os.path.exists('./ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, encoder_cv)): # i.e. a checkpoint *has* been saved for this config
+                if os.path.exists('../ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, encoder_cv)): # i.e. a checkpoint *has* been saved for this config
                     print('Loading encoder from checkpoint')
                     print('Classification CV: ', classification_cv)
                     print('Encoder for CV ', encoder_cv)
     
-                    checkpoint = torch.load('./ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, encoder_cv))
+                    checkpoint = torch.load('../ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, encoder_cv))
                     encoder = get_encoder(encoder_type, encoder_hyper_params).to(device)
                     encoder.load_state_dict(checkpoint['encoder_state_dict'])
                     
@@ -1129,6 +1123,9 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                         
                         del classifier_TEST_encodings
                         del classifier_TEST_labels
+
+                else:
+                    print("No encoder saved to load...")
 
                 
         print("CLASSIFICATION VALIDATION RESULT OVER CV FOR ENCODING HOUR")
@@ -1323,337 +1320,7 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
             
         
 
-    if data_type == 'MIMIC':
-        encoder = get_encoder(encoder_type=encoder_type, encoder_hyper_params=encoder_hyper_params)
-        encoder.to(device)
-        path = 'data/mimic/'
-
-        lab_IDs = ['ANION GAP', 'ALBUMIN', 'BICARBONATE', 'BILIRUBIN', 'CREATININE', 'CHLORIDE', 'GLUCOSE', 'HEMATOCRIT', 'HEMOGLOBIN',
-             'LACTATE', 'MAGNESIUM', 'PHOSPHATE', 'PLATELET', 'POTASSIUM', 'PTT', 'INR', 'PT', 'SODIUM', 'BUN', 'WBC']
-        # 20 lab measurements
-        # 
-        #
-        vital_IDs = ['HeartRate' , 'SysBP' , 'DiasBP' , 'MeanBP' , 'RespRate' , 'SpO2' , 'Glucose' ,'Temp']
-        # 8 vitals
-        #
-        constants = ['gender', 'age', 'ethnicity', 'first-time-icu']
-        # 4 constants 
-
-        signal_list = lab_IDs + vital_IDs
-
-        with open(os.path.join(path, 'train/x.pkl'), 'rb') as f:
-            train_mixed_data_maps = torch.Tensor(pickle.load(f))
-        with open(os.path.join(path, 'train/y.pkl'), 'rb') as f:
-            train_mixed_labels = torch.Tensor(pickle.load(f))
-        with open(os.path.join(path, 'test/x.pkl'), 'rb') as f:
-            test_mixed_data_maps = torch.Tensor(pickle.load(f))
-        with open(os.path.join(path, 'test/y.pkl'), 'rb') as f:
-            test_mixed_labels = torch.Tensor(pickle.load(f))
-
-        # Remove samples with nans if they exist
-        d = []
-        l = []
-        for i in range(len(train_mixed_data_maps)):
-            if torch.isnan(train_mixed_data_maps[i]).any():
-                continue
-            else:
-                d.append(train_mixed_data_maps[i])
-                l.append(train_mixed_labels[i])
-       
-        train_mixed_data_maps = torch.stack(d)
-        train_mixed_labels = torch.Tensor(l)
-
-
-        d = []
-        l = []
-        for i in range(len(test_mixed_data_maps)):
-            if torch.isnan(test_mixed_data_maps[i]).any():
-                continue
-            else:
-                d.append(test_mixed_data_maps[i])
-                l.append(test_mixed_labels[i])
-       
-        test_mixed_data_maps = torch.stack(d)
-        test_mixed_labels = torch.Tensor(l)
-        
-        test_mortality_data_maps = test_mixed_data_maps[torch.where(test_mixed_labels==1)]
-        test_mortality_labels = test_mixed_labels[torch.where(test_mixed_labels==1)]
-        test_normal_data_maps = test_mixed_data_maps[torch.where(test_mixed_labels==0)]
-        test_normal_labels = test_mixed_labels[torch.where(test_mixed_labels==0)]
-
-        ##########
-
-
-
-        print("SIGNAL LIST SELECTED FOR MIMIC: ")
-        print(signal_list)
-
     
-
-        print('test_mixed_data_maps shape: ', test_mixed_data_maps.shape)
-        print('test_mixed_labels shape: ', test_mixed_labels.shape)
-        print('train_data_mixed_maps shape: ', train_mixed_data_maps.shape)
-        print('train_mixed_labels shape: ', train_mixed_labels.shape)
-        window_size = learn_encoder_hyper_params['window_size']
-        
-        if is_train:
-            learn_encoder(train_data=train_mixed_data_maps, train_labels=train_mixed_labels, test_data=test_mixed_data_maps, test_labels=test_mixed_labels, encoder=encoder, pretrain_hyper_params=pretrain_hyper_params, **learn_encoder_hyper_params)
-        
-        
-        classifier_test_aurocs = []
-        classifier_test_auprcs = []
-
-        # Load in encoder from checkpoint
-        for cv in range(learn_encoder_hyper_params['n_cross_val_classification']):
-            random.seed(123*cv)
-            if os.path.exists('./ckpt/%s/%s_checkpoint_0.tar'%(data_type, UNIQUE_NAME)): # i.e. a checkpoint *has* been saved for this config
-                print('Loading encoder from checkpoint')
-                print('Model for CV ', cv)
-                checkpoint = torch.load('./ckpt/%s/%s_checkpoint_0.tar'%(data_type, UNIQUE_NAME))
-                encoder = checkpoint['encoder']
-
-                # Select random subset of training data to train with for classification
-                train_mixed_inds = np.arange(len(train_mixed_data_maps))
-
-                np.random.shuffle(train_mixed_inds)
-
-                train_mixed_data_maps = train_mixed_data_maps[train_mixed_inds][:int(0.8*(len(train_mixed_data_maps)))]
-                train_mixed_labels = train_mixed_labels[train_mixed_inds][:int(0.8*len(train_mixed_labels))]
-                
-
-                # Train a linear classifier to predict if embeddings correspond to mortality or not
-                
-                encoder.eval()
-                
-                classifier_train_encodings = [] 
-                classifier_train_labels = []
-
-                classifier_test_encodings = [] 
-                classifier_test_labels = []
-                with torch.no_grad(): # Don't compute gradients when generating encodings
-                    for ind in range(len(train_mixed_data_maps)):
-                        sample = train_mixed_data_maps[ind]
-                        sample_label = train_mixed_labels[ind]
-
-                        windows = []
-                        i = 0
-                        while i * window_size < sample.shape[-1]:
-                            windows.append(sample[:, :, i*window_size: (i+1)*window_size])
-                            i += 1
-                        
-                        windows = torch.stack(windows)
-                        classifier_train_encodings.append(encoder(windows))
-                        classifier_train_labels.append(sample_label)
-                
-                    for ind in range(len(test_mixed_data_maps)):
-                        sample = test_mixed_data_maps[ind]
-                        sample_label = test_mixed_labels[ind]
-
-                        windows = []
-                        i = 0
-                        while i * window_size < sample.shape[-1]:
-                            windows.append(sample[:, :, i*window_size: (i+1)*window_size])
-                            i += 1
-                        
-                        windows = torch.stack(windows)
-                        classifier_test_encodings.append(encoder(windows))
-                        classifier_test_labels.append(sample_label)
-
-                torch.set_grad_enabled(True)
-
-                classifier_train_encodings = torch.stack(classifier_train_encodings)
-                classifier_train_labels = torch.Tensor(classifier_train_labels)
-                classifier_test_encodings = torch.stack(classifier_test_encodings)
-                classifier_test_labels = torch.Tensor(classifier_test_labels)
-
-            
-                # Now we'll restructure the data so that mortality encodings and non mortality encodings are 
-                # mixed as uniformly as possible. If we don't do this, we might get batches when training the 
-                # linear classifier that contain all 1's or all 0's for labels, and AUC can't function with that.
-
-                final_classifier_train_encodings = []
-                final_classifier_train_labels = []
-                pos_indices = torch.where(classifier_train_labels==1)[0] # Indicies of mortality window encodings/labels--positive samples
-                neg_indices = torch.where(classifier_train_labels==0)[0] # Indicies of non mortality window encodings/labels--negative samples
-                num_neg_per_pos = len(neg_indices)//len(pos_indices)
-                
-                pos_hour_encodings = classifier_train_encodings[pos_indices]
-                neg_hour_encodings = classifier_train_encodings[neg_indices]
-                pos_hour_labels = classifier_train_labels[pos_indices]
-                neg_hour_labels = classifier_train_labels[neg_indices]
-
-                for i in range(len(pos_hour_encodings)):
-                    final_classifier_train_encodings.append(neg_hour_encodings[i*num_neg_per_pos: min((i+1)*num_neg_per_pos, len(neg_hour_encodings))])
-                    final_classifier_train_labels.extend(neg_hour_labels[i*num_neg_per_pos: min((i+1)*num_neg_per_pos, len(neg_hour_labels))])
-
-                    final_classifier_train_encodings.append(pos_hour_encodings[i].unsqueeze(0)) # Unsqueeze 0 so we have shape (1, num_windows_per_hour, encoding_size) so we can vstack later with tensors of shape (p, num_windows_per_hour, encoding_size) for some p
-                    final_classifier_train_labels.append(pos_hour_labels[i])
-
-                    if i == len(pos_hour_encodings) - 1: # Last iteration
-                        if (i+1)*num_neg_per_pos < len(neg_hour_encodings):
-                            final_classifier_train_encodings.append(neg_hour_encodings[(i+1)*num_neg_per_pos:])
-                            final_classifier_train_labels.extend(neg_hour_labels[(i+1)*num_neg_per_pos:])
-
-
-                # Now the same thing for the test set for the classifier
-
-                final_classifier_test_encodings = []
-                final_classifier_test_labels = []
-                pos_indices = torch.where(classifier_test_labels==1)[0] # Indicies of arrest window encodings/labels--positive samples
-                neg_indices = torch.where(classifier_test_labels==0)[0] # Indicies of nonarrest window encodings/labels--negative samples
-                num_neg_per_pos = len(neg_indices)//len(pos_indices)
-                
-                pos_hour_encodings = classifier_test_encodings[pos_indices]
-                neg_hour_encodings = classifier_test_encodings[neg_indices]
-                pos_hour_labels = classifier_test_labels[pos_indices]
-                neg_hour_labels = classifier_test_labels[neg_indices]
-
-                for i in range(len(pos_hour_encodings)):
-                    final_classifier_test_encodings.append(neg_hour_encodings[i*num_neg_per_pos: min((i+1)*num_neg_per_pos, len(neg_hour_encodings))])
-                    final_classifier_test_labels.extend(neg_hour_labels[i*num_neg_per_pos: min((i+1)*num_neg_per_pos, len(neg_hour_labels))])
-
-                    final_classifier_test_encodings.append(pos_hour_encodings[i].unsqueeze(0)) # Unsqueeze 0 so we have shape (1, num_windows_per_sample, encoding_size) so we can vstack later with tensors of shape (p, num_windows_per_hour, encoding_size) for some p
-                    final_classifier_test_labels.append(pos_hour_labels[i])
-
-                    if i == len(pos_hour_encodings) - 1: # Last iteration
-                        if (i+1)*num_neg_per_pos < len(neg_hour_encodings):
-                            final_classifier_test_encodings.append(neg_hour_encodings[(i+1)*num_neg_per_pos:])
-                            final_classifier_test_labels.extend(neg_hour_labels[(i+1)*num_neg_per_pos:])
-
-
-                
-                final_classifier_train_encodings = torch.vstack(final_classifier_train_encodings).to(device)
-                final_classifier_train_labels = torch.Tensor(final_classifier_train_labels).to(device)
-                final_classifier_test_encodings = torch.vstack(final_classifier_test_encodings).to(device)
-                final_classifier_test_labels = torch.Tensor(final_classifier_test_labels).to(device)
-
-                print("Training data for classifier shape: ", final_classifier_train_encodings.shape)
-                print("Training labels for classifier shape: ", final_classifier_train_labels.shape)
-                print("Number of pre arrest train encodings: ", sum(final_classifier_train_labels==1))
-                print("Number of non pre arrest train encodings: ", sum(final_classifier_train_labels==0))
-
-                print("Testing data for classifier shape: ", final_classifier_test_encodings.shape)
-                print("Testing labels for classifier shape: ", final_classifier_test_labels.shape, flush=True)
-                print("Number of pre arrest test encodings: ", sum(final_classifier_test_labels==1))
-                print("Number of non pre arrest test encodings: ", sum(final_classifier_test_labels==0))
-
-                # Ratio of num negative examples divided by num positive examples
-                pos_weight = sum(final_classifier_train_labels==0)/sum(final_classifier_train_labels==1)
-
-                rnn, classifier, auroc, auprc = train_linear_classifier(X_train=final_classifier_train_encodings, y_train=final_classifier_train_labels, X_test=final_classifier_test_encodings, y_test=final_classifier_test_labels, 
-                encoding_size=encoder.encoding_size, batch_size=32, pos_weight=pos_weight, return_models=True, return_scores=True, pos_sample_name='mortality', cv=cv, encoder_cv=encoder_cv)
-                classifier_test_aurocs.append(auroc)
-                classifier_test_auprcs.append(auprc)
-                '''
-                for cluster_size in range(1, 8):
-                    s_score = []
-                    db_score = []
-                    kmeans = KMeans(n_clusters=cluster_size, random_state=1).fit(encodings)
-                    cluster_labels = kmeans.labels_
-                    s_score.append(silhouette_score(encodings, cluster_labels))
-                    db_score.append(davies_bouldin_score(encodings, cluster_labels))
-                    del encodings
-                    print('Silhouette score: ', np.mean(s_score),'+-', np.std(s_score))
-                    print('Davies Bouldin score: ', np.mean(db_score),'+-', np.std(db_score))
-                '''
-        print("CLASSIFICATION RESULT OVER CV")
-        print("AUC: %.2f +- %.2f, AUPRC: %.2f +- %.2f"%(np.mean(classifier_test_aurocs), np.std(classifier_test_aurocs), np.mean(classifier_test_auprcs), np.std(classifier_test_auprcs)))
-        
-        if plot_embeddings:
-            # First, we'll plot random windows from the normal cohort, and random pre arrest windows from the arrest coohort
-            plot_normal_and_mortality(normal_data_maps=test_normal_data_maps, mortality_data_maps=test_mortality_data_maps, mortality_labels=test_mortality_labels,
-            encoder=encoder, device=device, window_size=window_size, data_type=data_type, unique_name=UNIQUE_NAME)
-
-
-            # Note: We're only plotting data from mortality cohort
-            normalization_specs = np.array([0, 1, 0, 1]) # temporarily doing manual. means=0, stds=1 so data is not unnormalized when plotted# np.load('DONTCOMMITdata/MIMIC/mortality_normalization_specs.npy')
-            # normalization_specs is of shape (4, num_features). First and second rows are means and stdvs for each feature for train set, third and fourth rows are same but for test set
-            normalization_specs = torch.Tensor(normalization_specs).to(device)
-            encoder.eval()
-            indexes_chosen = []
-            print("Starting to plot embeddings..")
-            num_plots = 8 # We'll plot 8 times. This number should be even
-            for plot_index in range(num_plots): 
-                print("Plot: ", plot_index)
-                # The first num_plots/2 will be for samples right before a CA, and the last num_plots/2 will be for samples that aren't.
-                
-                ind = np.random.randint(low=0, high=len(test_mixed_data_maps)-1)
-                if plot_index < num_plots/2:
-                    while test_mixed_labels[ind]!=1 or ind in indexes_chosen: # If the label for this sample is not 1, meaning this doesn't lead to death
-                        ind = np.random.randint(low=0, high=len(test_mixed_data_maps)-1) # Try another random sample
-                
-                else:
-                    while test_mixed_labels[ind]!=0 or ind in indexes_chosen: # If the label for this sample is 1, meaning this does lead to death
-                        ind = np.random.randint(low=0, high=len(test_mixed_data_maps)-1) # Try another random sample
-                
-                indexes_chosen.append(ind)
-                sample = torch.Tensor(test_mixed_data_maps[ind]).to(device)
-                windows = []
-                labels = []
-                for i in range(0, sample.shape[2]//window_size):
-                    windows.append(sample[:, :, sample.shape[2] - window_size*(i+1): sample.shape[2] - window_size*(i)])
-                    label = test_mixed_labels[ind]
-                    labels.append(label)
-                
-                # Reverse in place so now the order is temporally accurate ie windows / labels at the start of the list come temporally
-                # before windows / labels later in the list
-                windows.reverse()
-                labels.reverse() 
-
-                encodings = encoder(torch.stack(windows))
-                risk_scores_over_time = []
-
-                encoding_batch = torch.unsqueeze(encodings, 0)
-
-                output, _ = rnn(encoding_batch)
-                output = output[:, -1, :].squeeze()
-                risk_scores_over_time = classifier(output).to('cpu')
-
-
-                encodings = encodings.to('cpu')
-
-                encodings = encodings.detach().numpy() # Removes gradients and converts to numpy
-                pca = PCA(n_components=2)
-                pca.fit(encodings)
-                labels = np.array(labels)
-                #labels = np.reshape(labels, (labels.shape[0], 1))
-
-                reduced_encodings = pca.transform(encodings)
-                fig = plt.figure(figsize=(8, 6))
-
-                colors = []
-                for i in labels:
-                    if i == 0:
-                        colors.append("Black")  # Non mortality sample
-                    elif i == 1: 
-                        colors.append("Red")  # Mortality sample 
-
-                scatter = plt.scatter(reduced_encodings[:, 0], reduced_encodings[:, 1], c=colors, label=labels)
-
-                plt.title('Encodings Projected onto 2D')
-
-                plt.xlabel('First principal component')
-                plt.ylabel('Second principal component')
-                plt.savefig('./DONTCOMMITplots/%s/%s_%s_embeddings_%d.pdf'%(data_type, UNIQUE_NAME, 'mortality' if plot_index < num_plots/2 else 'normal', plot_index))
-                plt.close()
-
-                # Plot risk score over time
-                plt.figure(figsize=(15, 4))
-                plt.plot(np.arange(len(risk_scores_over_time)), np.array(risk_scores_over_time))
-                plt.xlabel('Time')
-                plt.ylabel('Risk score')
-                plt.savefig('./DONTCOMMITplots/%s/%s_%s_risk_over_time_%d.pdf'%(data_type, UNIQUE_NAME, 'mortality' if plot_index < num_plots/2 else 'normal', plot_index))
-
-                # Plot heatmap and trajectory scatter plot
-                sample = sample.to(device)
-                track_encoding(sample=sample, label=labels, encoder=encoder, window_size=window_size, normalization_specs=normalization_specs, path='./DONTCOMMITplots/', 
-                hm_file_name='%s/%s_%s_trajectory_hm_%d.pdf'%(data_type, UNIQUE_NAME, 'mortality' if plot_index < num_plots/2 else 'normal', plot_index), 
-                pca_file_name= '%s/%s_%s_trajectory_embeddings_%d.pdf'%(data_type, UNIQUE_NAME, 'mortality' if plot_index < num_plots/2 else 'normal', plot_index), 
-                device=device, signal_list=signal_list, length_of_hour=2, sliding_gap=1)
-
-                sample = sample.to('cpu') # Take off GPU memory
-
-            print("Done plotting embeddings.")
         
         
     
