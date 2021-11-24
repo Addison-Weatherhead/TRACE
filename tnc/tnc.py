@@ -972,6 +972,11 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                     print("Size of train data: ", train_mixed_data_maps.shape)
                     print("Size of train labels: ", train_mixed_labels.shape)
 
+                    print('Generating encodings for classificaiton..')
+
+
+                    print('Done generating encodings for classification')
+
                     train_ca_data_maps = train_mixed_data_maps[[1 in label for label in train_mixed_labels]]
                     train_ca_labels = train_mixed_labels[[1 in label for label in train_mixed_labels]]
                     train_normal_data_maps = train_mixed_data_maps[[1 not in label for label in train_mixed_labels]]
