@@ -1559,34 +1559,63 @@ class CausalCNNEncoder(torch.nn.Module):
     @param depth Depth of the causal CNN.
     @param reduced_size Fixed length to which the output time series of the
            causal CNN is reduced.
-    @param out_channels Number of output channels.
+    @param encoding_size Number of output channels.
     @param kernel_size Kernel size of the applied non-residual convolutions.
+    @param window_size windows of data to encode at a time. It should be ensured that this evenly
+            divides into the length of the time series passed in. E.g. window_size is 120, and 
+            x.shape[-1] (where x is passed into forward) is 120*c for some natural number c
     """
     def __init__(self, in_channels, channels, depth, reduced_size,
-                 out_channels, kernel_size, device):
+                 encoding_size, kernel_size, device, window_size):
         super(CausalCNNEncoder, self).__init__()
-        self.encoding_size = out_channels
+        self.encoding_size = encoding_size
         self.device = device
         causal_cnn = CausalCNN(
             in_channels, channels, depth, reduced_size, kernel_size
         )
         reduce_size = torch.nn.AdaptiveMaxPool1d(1)
         squeeze = SqueezeChannels()  # Squeezes the third dimension (time)
-        linear = torch.nn.Linear(reduced_size, out_channels)
+        linear = torch.nn.Linear(reduced_size, encoding_size)
         self.network = torch.nn.Sequential(
             causal_cnn, reduce_size, squeeze, linear
         ).to(device)
 
+        self.window_size = window_size
+
         
 
     def forward(self, x):
-
         x = x.to(self.device)
         if len(tuple(x.shape)) == 4 and x.shape[1] == 2: # Meaning maps are included
             x = torch.reshape(x, (x.shape[0], x.shape[2]*2, x.shape[3]))
+        
+        elif len(tuple(x.shape)) == 3 and x.shape[0] == 2: # Maps are included
+            x = torch.unsqueeze(x, 0) # Make it a batch of size 1, shape is (1, 2, num_features, seq_len)
+            x = torch.reshape(x, (x.shape[0], x.shape[2]*2, x.shape[3]))
+
         return self.network(x)
 
-    #def forward_seq()
+    def forward_seq(self, x):
+        '''Takes a tensor of shape (num_samples, 2, num_features, seq_len) of timeseries data.
+        
+        Returns a tensor of shape (num_samples, seq_len/winow_size, encoding_size)'''
+        assert x.shape[-1] % self.window_size == 0
+        if len(tuple(x.shape)) == 3:
+            x = torch.unsqueeze(x, 0)
+        
+        num_samples, two, num_features, seq_len = x.shape
+        x = torch.reshape(x, (num_samples, num_features*2, seq_len)) # now x is of shape (num_samples, 2*num_features, seq_len)
+        print(x.shape, '==', num_samples, 2*num_features, seq_len)
+        x = x.permute(1, 0, 2)
+        x = x.reshape(2*num_features, -1) # Now of shape (2*num_features, num_samples*seq_len)
+        print(x.shape, '==', 2*num_features, num_samples*seq_len)
+        x = torch.stack(torch.split(x, self.window_size, dim=1)) # Now of shape (num_samples*(seq_len/window_size), 2*num_features, window_size)
+        print(x.shape, '==', num_samples*(seq_len/self.window_size), 2*num_features, self.window_size)
+
+        encodings = self.forward(x) # encodings is of shape (num_samples*(seq_len/window_size), encoding_size)
+        print(encodings.shape, '==', num_samples*(seq_len/self.window_size), self.encoding_size)
+        encodings = encodings.reshape(num_samples, int(seq_len/self.window_size), self.encoding_size)
+        return encodings
 
 
 
