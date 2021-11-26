@@ -300,7 +300,7 @@ def trend_decompose(x, filter_size):
     plt.show()
 
 
-def PCA_valid_dataset_kmeans_labels(normal_encodings, ca_encodings, mixed_encodings, normal_cluster_labels, arrest_cluster_labels, mixed_cluster_labels, data_type, unique_name):
+def PCA_valid_dataset_kmeans_labels(normal_encodings, ca_encodings, mixed_encodings, normal_cluster_labels, arrest_cluster_labels, mixed_cluster_labels, data_type, unique_name, unique_id):
 
     colors = ['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w']
 
@@ -316,7 +316,7 @@ def PCA_valid_dataset_kmeans_labels(normal_encodings, ca_encodings, mixed_encodi
 
     plt.xlabel('First principal component')
     plt.ylabel('Second principal component')
-    plt.savefig('./DONTCOMMITplots/%s/%s_normal_embeddings.pdf'%(data_type, unique_name))
+    plt.savefig('../DONTCOMMITplots/%s/%s/%s_normal_embeddings.pdf'%(data_type, unique_id, unique_name))
 
 
     # PLOTTING ARREST PLOT
