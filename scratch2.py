@@ -6,7 +6,6 @@ import argparse
 import math
 import seaborn as sns; sns.set()
 import sys
-#import statsmodels.api as sm
 import numpy as np
 import pickle
 import os
@@ -22,39 +21,30 @@ from tnc.evaluations import WFClassificationExperiment, ClassificationPerformanc
 from sklearn.decomposition import PCA
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, classification_report
 import hdbscan
-
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-print(device)
+
+import torch.nn.functional as F
+x = torch.randn(10, 2, 10, 5040)
+print(x.shape)
 
 
+encoder = CausalCNNEncoder(in_channels=20, channels=8, depth=2, reduced_size=60, encoding_size=16, kernel_size=3, window_size=120, device=device)
 
-x = torch.randn(15, 2, 6, 49)
-window_size = 7
 
-encoder = CausalCNNEncoder(in_channels=12, channels=3, 
-                            depth=4, reduced_size=4, out_channels=10, 
-                            kernel_size=3, device=device, 
-                            window_size=window_size)
+out, encoding_mask = encoder.forward_seq(x, sliding_gap=20, return_encoding_mask=True)
+out = out.reshape(-1, 16)
+print('encodings shape:')
+print(out.shape)
+print('encodings mask shape:')
+print(encoding_mask.shape)
 
-classifier_encodings = []
-for ind in range(len(x)):
-    sample = x[ind]
+encodings = []
+for i in range(0, 5040-120, 20):
+    encodings.append(encoder(x[:, :, :, i: i+120]))
 
-    windows = []
-    i = 0
-    while i * window_size < sample.shape[-1]:
-        windows.append(sample[:, :, i*window_size: (i+1)*window_size])
-        i += 1
-    
-    windows = torch.stack(windows)
-    classifier_encodings.append(encoder(windows))
-
-classifier_encodings = torch.stack(classifier_encodings)
-
-encodings = encoder.forward_seq(x)
-
-print(classifier_encodings[14, 4, :])
-print(encodings[14, 4, :])
+encodings = torch.stack(encodings).permute(1, 0, 2).reshape(-1, 16)
 
 print(encodings.shape)
+
+print(encodings - out)
 

@@ -59,11 +59,8 @@ def plot_heatmap(sample, clustering_model, encoder, normalization_specs, path, h
 
             encodings.append(encoder(torch.unsqueeze(window, 0).to(device)).view(-1,)) # Add a dimension of size 1 at beginning so we have a 'batch' of size 1 for the encoder to work with.
         
-    print("len of encodings: ", len(encodings))
-    print('shape of one encoding: ', encodings[0].shape)
-    print()
     encodings = torch.stack(encodings, 0).to('cpu').detach().float()
-    print("Shape of encodings: ", encodings.shape)
+
     
 
 
@@ -71,8 +68,8 @@ def plot_heatmap(sample, clustering_model, encoder, normalization_specs, path, h
     means, stds = normalization_specs[0], normalization_specs[1]
     means = means.reshape(-1, 1)
     stds = stds.reshape(-1, 1)
-    sample[0][sample[1]==0] = (sample[0] * stds)[sample[1]==0] # At the places in the data [0] where the map is 1, multiply that data by std
-    sample[0][sample[1]==0] = (sample[0] + means)[sample[1]==0] # Then add mean
+    sample[0][sample[1]==1] = (sample[0] * stds)[sample[1]==1] # At the places in the data where the map is 1, multiply that data by std
+    sample[0][sample[1]==1] = (sample[0] + means)[sample[1]==1] # Then add mean
 
 
     if 'waveform' in path:
@@ -331,7 +328,7 @@ def PCA_valid_dataset_kmeans_labels(normal_encodings, ca_encodings, mixed_encodi
 
     plt.xlabel('First principal component')
     plt.ylabel('Second principal component')
-    plt.savefig('./DONTCOMMITplots/%s/%s_arrest_embeddings.pdf'%(data_type, unique_name))
+    plt.savefig('../DONTCOMMITplots/%s/%s/%s_arrest_embeddings.pdf'%(data_type, unique_id, unique_name))
 
 
     # PLOTTING MIXED PLOT
@@ -346,14 +343,14 @@ def PCA_valid_dataset_kmeans_labels(normal_encodings, ca_encodings, mixed_encodi
 
     plt.xlabel('First principal component')
     plt.ylabel('Second principal component')
-    plt.savefig('./DONTCOMMITplots/%s/%s_arrest_and_normal_embeddings.pdf'%(data_type, unique_name))
+    plt.savefig('../DONTCOMMITplots/%s/%s/%s_arrest_and_normal_embeddings.pdf'%(data_type, unique_id, unique_name))
     
 
 
 
 
 
-def plot_normal_and_mortality(normal_data_maps, mortality_data_maps, mortality_labels, encoder, device, window_size, data_type, unique_name):
+def plot_normal_and_mortality(normal_data_maps, mortality_data_maps, mortality_labels, encoder, device, window_size, data_type, unique_name, unique_id):
     mortality_samples = []
 
     for i in range(len(mortality_labels)):
@@ -400,5 +397,5 @@ def plot_normal_and_mortality(normal_data_maps, mortality_data_maps, mortality_l
 
     plt.xlabel('First principal component')
     plt.ylabel('Second principal component')
-    plt.savefig('./DONTCOMMITplots/%s/%s_mortality_and_normal_embeddings.pdf'%(data_type, unique_name))
+    plt.savefig('../DONTCOMMITplots/%s/%s/%s_mortality_and_normal_embeddings.pdf'%(data_type, unique_id, unique_name))
     plt.close()

@@ -2,3 +2,4 @@ __pycache__
 grid_search.py
 tnc_for_hyper_param_optimization.py
 hyper_param_opt.sh
+trainclassifier.sh

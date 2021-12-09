@@ -17,10 +17,10 @@ import os
 import random
 os.environ['MKL_THREADING_LAYER'] = 'GNU' # Set this value to allow grid_search.py to work.
 from sklearn.metrics import silhouette_score, davies_bouldin_score
-from sklearn.cluster import KMeans
+from sklearn.cluster import AgglomerativeClustering
 from datetime import datetime
 from tnc.models import CNN_Transformer_Encoder, EncoderMultiSignalMIMIC, GRUDEncoder, RnnEncoder, WFEncoder, TST, EncoderMultiSignal, LinearClassifier, RnnPredictor, EncoderMultiSignalMIMIC, CausalCNNEncoder
-from tnc.utils import plot_distribution, plot_heatmap, PCA_valid_dataset_kmeans_labels, plot_normal_and_mortality, plot_pca_trajectory
+from tnc.utils import plot_heatmap, PCA_valid_dataset_kmeans_labels, plot_normal_and_mortality, plot_pca_trajectory
 from tnc.evaluations import WFClassificationExperiment, ClassificationPerformanceExperiment
 from statsmodels.tsa import stattools
 from sklearn.decomposition import PCA
@@ -328,56 +328,99 @@ class TNCDataset(data.Dataset):
 
 ######################################################################################################
 
-def linear_classifier_epoch_run(data, labels, train, num_pre_positive_encodings, batch_size, rnn, classifier, optimizer):
+def linear_classifier_epoch_run(data, labels, train, num_pre_positive_encodings, batch_size, rnn, classifier, optimizer, encoder):
+    epoch_losses = []
+    epoch_predictions = []
+    epoch_labels = []
     for i in range(data.shape[0]//batch_size): # Split into batches for training
         if i == data.shape[0]//batch_size - 1:
-            encoding_batch = data[i*batch_size:].to(device)
-            label_batch = labels[i*batch_size:].to(device)
+            data_batch = data[i*batch_size:]
+            label_batch = labels[i*batch_size:].to(device)    
         else:
-            encoding_batch = data[i*batch_size: (i+1)*batch_size].to(device)
-            label_batch = labels[i*batch_size: (i+1)*batch_size].to(device)
+            data_batch = data[i*batch_size: (i+1)*batch_size] # of shape (batch_size, 2, num_features, seq_len)
+            label_batch = labels[i*batch_size: (i+1)*batch_size].to(device) # of shape (batch_size,)
         
+        
+        for j, sample in enumerate(data_batch):
+            if sample[1, 0, 0] == -1:
+                break
+        
+
+        # encoding_batch is of shape (batch_size, seq_len/window_size, encoding_size)
+        encoding_batch, encoding_mask = encoder.forward_seq(data_batch, return_encoding_mask=True) # encoding_mask is of shape (batch_size, seq_len/window_size)
+        encoding_batch = encoding_batch.to(device)
+        encoding_mask = encoding_mask.to(device)
+        
+
         # encoding_batch and label_batch are of size (batch_size, seq_len/window_size, encoding_size) and (batch_size)
-        rnn_window = torch.randint(1, 4) # generates a number between 1 and 3 inclusive. This is the number of encodings the rnn will be fed
-        positive_samples = encoding_batch[label_batch==1]
-        negative_samples = encoding_batch[label_batch==0]
+        rnn_window_size = int(torch.randint(low=1, high=4, size=(1,))) # generates a number between 1 and 3 inclusive. This is the number of encodings the rnn will be fed at a time
+        positive_inds = torch.where(label_batch==1)
+        positive_encodings = encoding_batch[positive_inds] # of shape (num_pos_in_batch, seq_len/window_size, encoding_size)
+        positive_encodings_mask = encoding_mask[positive_inds] # of shape (num_pos_in_batch, seq_len/window_size)
         
-        positive_samples = positive_samples[:, -num_pre_positive_encodings:, :] # now of shape (num_pos_in_batch, num_pre_positive_encodings, encoding_size)
-        
-        positive_samples = positive_samples[:, -(positive_samples.shape[1]//rnn_window)*rnn_window:, :] # Clips each sample on the left side so the number of encodings is divisible by window_rnn
-        negative_samples = negative_samples[:, -(negative_samples.shape[1]//rnn_window)*rnn_window:, :]
-
-        negative_samples = negative_samples.reshape(-1, rnn_window, negative_samples.shape[-1]) # Now of shape (num_neg_windows_over_all_samples, rnn_window, encoding_size)
-        positive_samples = positive_samples.reshape(-1, rnn_window, positive_samples.shape[-1]) # Now of shape (num_pos_windows_over_all_samples, rnn_window, encoding_size)
-
-        neg_window_labels = torch.zeros(negative_samples.shape[0], 1)
-        pos_window_labels = torch.ones(positive_samples.shape[0], 1)
+        negative_inds = torch.where(label_batch==0)
+        negative_encodings = encoding_batch[negative_inds] # of shape (num_neg_in_batch, seq_len/window_size, encoding_size)
+        negative_encodings_mask = encoding_mask[negative_inds] # of shape (num_neg_in_batch, seq_len/window_size)
 
         
+        positive_encodings = positive_encodings[:, -num_pre_positive_encodings:, :] # now of shape (num_pos_in_batch, num_pre_positive_encodings, encoding_size)
+        positive_encodings_mask = positive_encodings_mask[:, -num_pre_positive_encodings:] # now of shape (num_pos_in_batch, num_pre_positive_encodings)
+        
 
-        window_samples = torch.vstack([positive_samples, negative_samples])
-        window_labels = torch.cat([pos_window_labels, neg_window_labels])
+        positive_encodings = positive_encodings[:, -(positive_encodings.shape[1]//rnn_window_size)*rnn_window_size:, :] # Clips each sample on the left side so the number of encodings is divisible by rnn_window_size
+        positive_encodings_mask = positive_encodings_mask[:, -(positive_encodings_mask.shape[1]//rnn_window_size)*rnn_window_size:]
+        negative_encodings = negative_encodings[:, -(negative_encodings.shape[1]//rnn_window_size)*rnn_window_size:, :]
+        negative_encodings_mask = negative_encodings_mask[:, -(negative_encodings_mask.shape[1]//rnn_window_size)*rnn_window_size:]
 
+
+        negative_encodings = negative_encodings.reshape(-1, rnn_window_size, negative_encodings.shape[-1]) # Now of shape (num_neg_rnn_window_sizes_over_all_encodings, rnn_window_size, encoding_size)
+        positive_encodings = positive_encodings.reshape(-1, rnn_window_size, positive_encodings.shape[-1]) # Now of shape (num_pos_rnn_window_sizes_over_all_encodings, rnn_window_size, encoding_size)
+        negative_encodings_mask = negative_encodings_mask.reshape(-1, rnn_window_size) # Now of shape (num_neg_rnn_window_sizes_over_all_encodings, rnn_window_size)
+        positive_encodings_mask = positive_encodings_mask.reshape(-1, rnn_window_size) # Now of shape (num_pos_rnn_window_sizes_over_all_encodings, rnn_window_size)
+
+        # Now we'll do the mode of each rnn window of encodings. So for each sequence of encodings, we'll take the mode value of the mask
+        negative_encodings_mask = torch.mode(negative_encodings_mask, dim=1)[0] # of shape (num_neg_rnn_window_sizes_over_all_encodings,)
+        positive_encodings_mask = torch.mode(positive_encodings_mask, dim=1)[0] # of shape (num_pos_rnn_window_sizes_over_all_encodings,)
+
+        neg_window_labels = torch.zeros(negative_encodings.shape[0], 1)
+        pos_window_labels = torch.ones(positive_encodings.shape[0], 1)
+        
+
+        window_samples = torch.vstack([positive_encodings, negative_encodings]) # of shape (num_rnn_window_sizes_over_all_encodings, rnn_window_size, encoding_size)
+        window_labels = torch.cat([pos_window_labels, neg_window_labels]) # of shape (num_rnn_window_sizes_over_all_encodings, 1)
+        window_masks = torch.cat([positive_encodings_mask, negative_encodings_mask]) # of shape (num_rnn_window_sizes_over_all_encodings,)
+
+        # Remove all sequences of encodings that were at least partly derived from fully imputed data.
+        window_samples = window_samples[torch.where(window_masks!=-1)]
+        window_labels = window_labels[torch.where(window_masks!=-1)]
+
+
+        '''
+        print("SHUFFLING DATA BEFORE FEEDING INTO RNN!")
+        # Shuffling before feeding to RNN
         inds = np.arange(len(window_samples))
         np.random.shuffle(inds)
         window_samples = window_samples[inds]
         window_labels = window_labels[inds]
+        window_masks = window_masks[inds]
+        '''
 
         _, hidden_and_cell = rnn(window_samples)
         hidden_state = hidden_and_cell[0] # hidden state is of shape (1, batch_size, hidden_size). Contains the last hidden state for each sample in the batch
         hidden_state = torch.squeeze(hidden_state)
-
-        predictions = torch.squeeze(classifier(hidden_state))
-        # Shape of predictions is (batch_size)
         
+        predictions = torch.squeeze(classifier(hidden_state))
+        # Shape of predictions and window_labels is (batch_size)
+        window_labels = torch.squeeze(window_labels).to(device)
         if train:
             # Ratio of num negative examples divided by num positive examples is pos_weight
-            pos_weight = negative_samples.shape[0] / positive_samples.shape[0]
-            loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight) # Applies sigmoid to outputs passed in so we shouldn't have sigmoid in the model.
+            pos_weight = torch.Tensor([negative_encodings.shape[0] / max(positive_encodings.shape[0], 1)]).to(device)
+            loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight) # Applies sigmoid to outputs passed in so we shouldn't have sigmoid in the model. 
             loss = loss_fn(predictions, window_labels)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            
 
         else:
             loss_fn = torch.nn.BCEWithLogitsLoss()
@@ -391,10 +434,18 @@ def linear_classifier_epoch_run(data, labels, train, num_pre_positive_encodings,
         # Move Tensors to CPU and remove gradients so they can be converted to NumPy arrays in the sklearn functions
         window_labels = window_labels.cpu().detach()
         predictions = predictions.cpu().detach()
+        encoding_batch = encoding_batch.cpu() # Move off GPU memory
+        neg_window_labels = neg_window_labels.cpu()
+        pos_window_labels = pos_window_labels.cpu()
+        label_batch = label_batch.cpu()
 
-        return predictions, epoch_loss, window_labels
+        epoch_losses.append(epoch_loss)
+        epoch_predictions.append(predictions)
+        epoch_labels.append(window_labels)
+    
+    return epoch_predictions, epoch_losses, epoch_labels
 
-def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST, y_TEST, encoding_size, num_pre_positive_encodings, batch_size=32, return_models=False, return_scores=False, pos_sample_name='arrest', data_type='ICU', classification_cv=0, encoder_cv=0):
+def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST, y_TEST, encoding_size, num_pre_positive_encodings, encoder, batch_size=32, return_models=False, return_scores=False, pos_sample_name='arrest', data_type='ICU', classification_cv=0, encoder_cv=0):
     '''
     Trains an RNN and linear classifier jointly. X_train is of shape (num_samples, num_windows_per_hour, encoding_size)
     and y_train is of shape (num_samples)
@@ -416,52 +467,30 @@ def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST
     optimizer = torch.optim.Adam(params, lr=.001, weight_decay=.005)
     
     for epoch in range(1, 101):
-        epoch_train_losses = []
-        epoch_train_predictions = []
-        epoch_train_labels = []
-
-        epoch_validation_losses = []
-        epoch_validation_predictions = []
-        epoch_validation_labels = []
-
-        epoch_TEST_losses = []
-        epoch_TEST_predictions = []
-        epoch_TEST_labels = []
-        
-
         classifier.train()
         rnn.train()
+        encoder.eval()
 
-        train_predictions, train_loss, train_window_labels = linear_classifier_epoch_run(data=X_train, labels=y_train, train=True, 
+        epoch_train_predictions, epoch_train_losses, epoch_train_labels = linear_classifier_epoch_run(data=X_train, labels=y_train, train=True, 
                                                     num_pre_positive_encodings=num_pre_positive_encodings,
                                                     batch_size=batch_size, rnn=rnn, classifier=classifier,
-                                                    optimizer=optimizer)
-
-        epoch_train_losses.append(train_loss)
-        epoch_train_predictions.append(train_predictions)
-        epoch_train_labels.append(train_window_labels)
+                                                    optimizer=optimizer, encoder=encoder)
 
         
         classifier.eval()
         rnn.eval()
-        validation_predictions, validation_loss, validation_window_labels = linear_classifier_epoch_run(data=X_validation, labels=y_validation, train=False, 
+        epoch_validation_predictions, epoch_validation_losses, epoch_validation_labels = linear_classifier_epoch_run(data=X_validation, labels=y_validation, train=False, 
                                                     num_pre_positive_encodings=num_pre_positive_encodings,
                                                     batch_size=batch_size, rnn=rnn, classifier=classifier,
-                                                    optimizer=optimizer)
+                                                    optimizer=optimizer, encoder=encoder)
 
-        epoch_validation_losses.append(validation_loss)
-        epoch_validation_predictions.append(validation_predictions)
-        epoch_validation_labels.append(validation_window_labels)
+        
         
 
-        TEST_predictions, TEST_loss, TEST_window_labels = linear_classifier_epoch_run(data=X_TEST, labels=y_TEST, train=False, 
+        epoch_TEST_predictions, epoch_TEST_losses, epoch_TEST_labels = linear_classifier_epoch_run(data=X_TEST, labels=y_TEST, train=False, 
                                                     num_pre_positive_encodings=num_pre_positive_encodings,
                                                     batch_size=batch_size, rnn=rnn, classifier=classifier,
-                                                    optimizer=optimizer)
-
-        epoch_TEST_losses.append(TEST_loss)
-        epoch_TEST_predictions.append(TEST_predictions)
-        epoch_TEST_labels.append(TEST_window_labels)
+                                                    optimizer=optimizer, encoder=encoder)
 
         
         # TRAIN 
@@ -469,6 +498,8 @@ def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST
         epoch_train_loss = np.mean(epoch_train_losses)
         epoch_train_predictions = torch.cat(epoch_train_predictions)
         epoch_train_labels = torch.cat(epoch_train_labels)
+        print('epoch_train_predictions shape: ', epoch_train_predictions.shape)
+        print('epoch_train_labels shape: ', epoch_train_labels.shape)
 
         epoch_train_auroc = roc_auc_score(epoch_train_labels, epoch_train_predictions)
         # Compute precision recall curve
@@ -514,12 +545,13 @@ def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST
             epoch_TEST_predictions[epoch_TEST_predictions < 0.5] = 0
             
             print("Train classification report: ")
-            print(classification_report(y_train.to('cpu'), epoch_train_predictions, target_names=['normal', pos_sample_name]))
+            print('epoch_train_labels shape: ', epoch_train_labels.shape, 'epoch_train_predictions shape: ', epoch_train_predictions.shape)
+            print(classification_report(epoch_train_labels.to('cpu'), epoch_train_predictions, target_names=['normal', pos_sample_name]))
             print("Validation classification report: ")
-            print(classification_report(y_validation.to('cpu'), epoch_validation_predictions, target_names=['normal', pos_sample_name]))
+            print(classification_report(epoch_validation_labels.to('cpu'), epoch_validation_predictions, target_names=['normal', pos_sample_name]))
             print()
             print("TEST classification report: ")
-            print(classification_report(y_TEST.to('cpu'), epoch_TEST_predictions, target_names=['normal', pos_sample_name]))
+            print(classification_report(epoch_TEST_labels.to('cpu'), epoch_TEST_predictions, target_names=['normal', pos_sample_name]))
             print()
 
 
@@ -709,10 +741,6 @@ def learn_encoder(data_maps, labels, encoder_type, encoder_hyper_params, pretrai
 
         print("Done making TNCDataset object for validation data")
 
-        print("nghd sizes:", nghd_sizes, flush=True)
-        print("Recall, each nghd_size is the size of the standard deviation of the normal distribution defining the nghd")
-        print("num_neg_samples_removed: ", num_neg_samples_removed)
-
         train_loader = data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
         valid_loader = data.DataLoader(validset, batch_size=batch_size, shuffle=True)
 
@@ -775,9 +803,12 @@ def learn_encoder(data_maps, labels, encoder_type, encoder_hyper_params, pretrai
             plt.savefig("../DONTCOMMITplots/%s/%s/%s_discriminator_accuracy_%d.pdf"%(data_type, UNIQUE_ID, UNIQUE_NAME, cv))
 
 
-    
-            
 
+            
+    print("nghd sizes:", nghd_sizes, flush=True)
+    print("Recall, each nghd_size is the size of the standard deviation of the normal distribution defining the nghd")
+    print("num_neg_samples_removed: ", num_neg_samples_removed)
+    
     print('=======> Performance Summary:')
     print('Accuracy: %.2f +- %.2f'%(100*np.mean(accuracies), 100*np.std(accuracies)))
     print('Loss: %.4f +- %.4f'%(np.mean(losses), np.std(losses)))
@@ -846,266 +877,294 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
             TEST_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'test_mixed_labels.npy')))
 
             train_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_mixed_data_maps.npy')))
-            train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_mixed_labels.npy')))
+            train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_mixed_labels.npy'))) 
 
+    elif data_type == 'HiRID':
+        window_size = learn_encoder_hyper_params['window_size']
+        length_of_hour = (60*60)/300 # 60 seconds * 60 / 300 (which is num seconds in 5 min)
+        pos_sample_name = 'mortality'
+        path = '../DONTCOMMITdata/hirid_numpy'
+        signal_list = ['vm1', 'vm3', 'vm4', 'vm5', 'vm13', 'vm20', 'vm28', 'vm62', 'vm136', 'vm146', 'vm172', 'vm174', 'vm176', 'pm41', 'pm42', 'pm43', 'pm44', 'pm87']
+        sliding_gap = 1
+        pre_positive_window = int((24*60*60)/300) # 24 hrs
+        num_pre_positive_encodings = int(pre_positive_window/window_size)
+
+        if DEBUG: # Smaller version of dataset to debug code with. Not representitive of the whole cohort, and test data is same as train/valid
+            TEST_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'TEST_data_maps.npy'))).float()[0:100]
+            TEST_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'TEST_labels.npy'))).float()[0:100]
+
+            train_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_data_maps.npy'))).float()[0:150]
+            train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_labels.npy'))).float()[0:150]
+
+            # set encoder cv and classifier cv to 1 so things run faster
+            learn_encoder_hyper_params['n_cross_val_encoder'] = 1
+            classification_hyper_params['n_cross_val_classification'] = 1
+
+        else:
+            # NOTE THE MAP CHANNEL HAS 1'S FOR OBSERVED VALUES, 0'S FOR MISSING VALUES
+            # data_maps arrays are of shape (num_samples, 2, 18, 1152). 4 days of data per sample
+            
+            
+            TEST_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'TEST_data_maps.npy'))).float()
+            TEST_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'TEST_labels.npy'))).float()
+
+            train_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_data_maps.npy'))).float()
+            train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_labels.npy'))).float()
         
+    if train_encoder:
+        learn_encoder(data_maps=train_mixed_data_maps, labels=train_mixed_labels, 
+        encoder_type=encoder_type, encoder_hyper_params=encoder_hyper_params, 
+        pretrain_hyper_params=pretrain_hyper_params, **learn_encoder_hyper_params)
 
-        
-        if train_encoder:
-            learn_encoder(data_maps=train_mixed_data_maps, labels=train_mixed_labels, 
-            encoder_type=encoder_type, encoder_hyper_params=encoder_hyper_params, 
-            pretrain_hyper_params=pretrain_hyper_params, **learn_encoder_hyper_params)
+    classifier_validation_aurocs = []
+    classifier_validation_auprcs = []
+    classifier_TEST_aurocs = []
+    classifier_TEST_auprcs = []
 
-        classifier_validation_aurocs = []
-        classifier_validation_auprcs = []
-        classifier_TEST_aurocs = []
-        classifier_TEST_auprcs = []
+    for encoder_cv in range(learn_encoder_hyper_params['n_cross_val_encoder']):
+        for classification_cv in range(classification_hyper_params['n_cross_val_classification']):
+            random.seed(123*classification_cv)
+            if os.path.exists('../ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, encoder_cv)): # i.e. a checkpoint *has* been saved for this config
+                print('Loading encoder from checkpoint')
+                print('Classification CV: ', classification_cv)
+                print('Encoder for CV ', encoder_cv)
 
-        for encoder_cv in range(learn_encoder_hyper_params['n_cross_val_encoder']):
-            for classification_cv in range(classification_hyper_params['n_cross_val_classification']):
-                random.seed(123*classification_cv)
-                if os.path.exists('../ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, encoder_cv)): # i.e. a checkpoint *has* been saved for this config
-                    print('Loading encoder from checkpoint')
-                    print('Classification CV: ', classification_cv)
-                    print('Encoder for CV ', encoder_cv)
-    
-                    checkpoint = torch.load('../ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, encoder_cv))
-                    encoder = get_encoder(encoder_type, encoder_hyper_params).to(device)
-                    encoder.load_state_dict(checkpoint['encoder_state_dict'])
-                    
-                    
-                    # shuffle for this cv:
-                    inds = np.arange(len(train_mixed_data_maps))
-                    np.random.shuffle(inds)
-                    train_mixed_data_maps = train_mixed_data_maps[inds]
-                    train_mixed_labels = train_mixed_labels[inds]
-                    print("Size of train + valid data: ", train_mixed_data_maps.shape)
-                    print("Size of train + valid labels: ", train_mixed_labels.shape)
-
-                    validation_mixed_data_maps = train_mixed_data_maps[0:int(0.2*len(train_mixed_data_maps))]
-                    validation_mixed_labels = train_mixed_labels[0:int(0.2*len(train_mixed_data_maps))]
-                    print("Size of valid data: ", validation_mixed_data_maps.shape)
-                    print("Size of valid labels: ", validation_mixed_labels.shape)
-
-                    train_mixed_data_maps = train_mixed_data_maps[int(0.2*len(train_mixed_data_maps)):]
-                    train_mixed_labels = train_mixed_labels[int(0.2*len(train_mixed_labels)):]
-                    print("Size of train data: ", train_mixed_data_maps.shape)
-                    print("Size of train labels: ", train_mixed_labels.shape)
-
-                    print('Generating encodings for classificaiton..')
-                    encoder.eval()
-                        
-                    with torch.no_grad(): # Don't compute gradients when generating encodings
-                        print('Encoding train data...')
-                        train_mixed_encodings = encoder.forward_seq(train_mixed_data_maps)
-                        print('train_mixed_encodings shape: ', train_mixed_encodings.shape)
-                        print("Encoding validation data...")
-                        validation_mixed_encodings = encoder.forward_seq(validation_mixed_data_maps)
-                        print('validation_mixed_encodings shape: ', validation_mixed_encodings.shape)
-                        print("Encoding TEST data...")
-                        TEST_mixed_encodings = encoder.forward_seq(TEST_mixed_data_maps)
-                        print('TEST_mixed_encodings shape: ', TEST_mixed_encodings.shape)
-                    
-                    torch.set_grad_enabled(True)
-                    print('Done generating encodings for classification')
-
-                    if os.path.exists('../ckpt/%s/%s_encoder_checkpoint_%d_Classifier_checkpoint_%d.tar'%(data_type, UNIQUE_ID, encoder_cv, classification_cv)):
-                        checkpoint = torch.load('../ckpt/%s/%s_encoder_checkpoint_%d_Classifier_checkpoint_%d.tar'%(data_type, UNIQUE_ID, encoder_cv, classification_cv))
-                        rnn = RnnPredictor(encoding_size=encoder_hyper_params['encoding_size'], hidden_size=32).to(device)
-                        # 32 is the arbitrary hidden size chosen for the RNN
-                        classifier = LinearClassifier(input_size=32).to(device)
-                        
-                        rnn.load_state_dict(checkpoint['rnn_state_dict'])
-                        classifier.load_state_dict(checkpoint['classifier_state_dict'])
-                        print("Checkpoint loaded for classifier! Encoder cv %d, classifier cv %d"%(encoder_cv, classification_cv))
-                    else:
-                        print("TRAINING LINEAR CLASSIFIER")
-                        classifier_train_labels = torch.Tensor([1 in label for label in train_mixed_labels]) # Sets labels for positive samples to 1
-                        classifier_validation_labels = torch.Tensor([1 in label for label in validation_mixed_labels]) # Sets labels for positive samples to 1
-                        classifier_TEST_labels = torch.Tensor([1 in label for label in TEST_mixed_labels]) # Sets labels for positive samples to 1
-                        
-
-                        rnn, classifier, valid_auroc, valid_auprc, TEST_auroc, TEST_auprc = train_linear_classifier(X_train=train_mixed_encodings, y_train=classifier_train_labels, 
-                        X_validation=validation_mixed_encodings, y_validation=classifier_validation_labels, 
-                        X_TEST=TEST_mixed_encodings, y_TEST=classifier_TEST_labels,
-                        encoding_size=encoder.encoding_size, batch_size=32, return_models=True, return_scores=True, pos_sample_name=pos_sample_name, 
-                        data_type=data_type, classification_cv=classification_cv, encoder_cv=encoder_cv)
-
-                        classifier_validation_aurocs.append(valid_auroc)
-                        classifier_validation_auprcs.append(valid_auprc)
-                        classifier_TEST_aurocs.append(TEST_auroc)
-                        classifier_TEST_auprcs.append(TEST_auprc)
-
+                checkpoint = torch.load('../ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, encoder_cv))
+                encoder = get_encoder(encoder_type, encoder_hyper_params).to(device)
+                encoder.load_state_dict(checkpoint['encoder_state_dict'])
                 
-        print("CLASSIFICATION VALIDATION RESULT OVER CV")
-        print("AUC: %.2f +- %.2f, AUPRC: %.2f +- %.2f"% \
-            (np.mean(classifier_validation_aurocs), 
-            np.std(classifier_validation_aurocs), 
-            np.mean(classifier_validation_auprcs), 
-            np.std(classifier_validation_auprcs)))
-
-        print("CLASSIFICATION TEST RESULT OVER CV")
-        print("AUC: %.2f +- %.2f, AUPRC: %.2f +- %.2f"% \
-            (np.mean(classifier_TEST_aurocs), 
-            np.std(classifier_TEST_aurocs), 
-            np.mean(classifier_TEST_auprcs), 
-            np.std(classifier_TEST_auprcs)))
-                        
-        print("Starting encoding clustering on validation set..")
-
-        if plot_embeddings:
-            clustering_model = hdbscan.HDBSCAN(min_cluster_size=40, min_samples=23, cluster_selection_epsilon=.25, gen_min_span_tree=True, core_dist_n_jobs=4, metric='jaccard')
-            seq_len = validation_mixed_data_maps.shape[-1]
-
-            validation_mixed_encodings = torch.cat([sample for sample in validation_mixed_data_maps], dim=2) # Re shaped so now each sample is concatenated next to each other. Shape is now (2, num_features, num_samples*seq_len)
-            validation_mixed_encodings = torch.split(validation_mixed_encodings, window_size, dim=-1) # Creates a tuple of tensors, each of shape (2, num_features, window_size). The first seq_len/window_size are for sample 0, the next seq_len/window_size are for sample 1, etc.
-            validation_mixed_encodings = torch.stack(validation_mixed_encodings) # Turn into tensor
-            validation_mixed_encodings = encoder(validation_mixed_encodings)
-            
-            validation_mixed_labels_for_windows = torch.Tensor([1 in label for label in validation_mixed_labels]).reshape(-1, 1) # of shape (num_samples,1)
-            validation_mixed_labels_for_windows = validation_mixed_labels_for_windows.repeat(1, int(seq_len/window_size)) # Repeats so its of shape (num_samples, seq_len/window_size=num_windows_per_sample). Each row is all 1's if its a positive sample, 0's else
-            validation_mixed_labels_for_windows = validation_mixed_labels_for_windows.reshape(-1,) # Reshape into a vector
-            
-            validation_ca_encodings = validation_mixed_encodings[validation_mixed_labels_for_windows==1]
-            validation_normal_encodings = validation_mixed_encodings[validation_mixed_labels_for_windows==0]
-
-
-
-            validation_ca_encodings = validation_ca_encodings.to('cpu').detach()
-            validation_normal_encodings = validation_normal_encodings.to('cpu').detach()
-            validation_mixed_encodings = validation_mixed_encodings.to('cpu').detach()
-
-            clustering_model.fit(validation_mixed_encodings)
-            mixed_validation_cluster_labels = clustering_model.labels_
-
-
-            ca_validation_cluster_labels = mixed_validation_cluster_labels[validation_mixed_labels_for_windows==1]
-            normal_validation_cluster_labels = mixed_validation_cluster_labels[validation_mixed_labels_for_windows==0]
-            n_clusters = len(np.unique(mixed_validation_cluster_labels))
-            
-            plt.figure(figsize=(8, 5))
-            plt.hist(mixed_validation_cluster_labels, bins=n_clusters, density=False)
-            plt.ylabel('Count')
-            plt.xlabel('State')
-            plt.xticks(ticks=np.arange(n_clusters), labels=np.arange(n_clusters))
-            plt.savefig('./DONTCOMMITplots/%s/%s/%s_mixed_cluster_label_hist.pdf'%(data_type, UNIQUE_ID, unique_name))
-
-            
-            plt.figure(figsize=(8, 5))
-            plt.hist(normal_validation_cluster_labels, bins=n_clusters, density=False)
-            plt.ylabel('Count')
-            plt.xlabel('State')
-            plt.xticks(ticks=np.arange(n_clusters), labels=np.arange(n_clusters))
-            plt.savefig('../DONTCOMMITplots/%s/%s/%s_normal_cluster_label_hist.pdf'%(data_type, UNIQUE_ID, unique_name))
-            
-            plt.figure(figsize=(8, 5))
-            plt.hist(ca_validation_cluster_labels, bins=n_clusters, density=False)
-            plt.ylabel('Count')
-            plt.xlabel('State')
-            plt.xticks(ticks=np.arange(n_clusters), labels=np.arange(n_clusters))
-            plt.savefig('./DONTCOMMITplots/%s/%s/%s_arrest_cluster_label_hist.pdf'%(data_type, UNIQUE_ID, unique_name))
-
-
-            
-            # First, we'll plot embeddings of samples from the validation set, with labels from the kmeans model. This will produce a plot for arrest samples, a plot for normal samples, and a plot with mixed.
-            PCA_valid_dataset_kmeans_labels(normal_encodings=validation_normal_encodings, ca_encodings=validation_ca_encodings, mixed_encodings=validation_mixed_encodings,
-                                            normal_cluster_labels=normal_validation_cluster_labels, arrest_cluster_labels=ca_validation_cluster_labels,
-                                            mixed_cluster_labels=mixed_validation_cluster_labels,
-                                            data_type=data_type, unique_name=UNIQUE_NAME, unique_id=UNIQUE_ID)
-
-            
-            print("Sliding Window: ", sliding_gap)
-
-
-            
-            normalization_specs = np.load(os.path.join(path, 'normalization_specs.npy'))
-            # normalization_specs is of shape (4, num_features). First and second rows are means and stdvs for each feature for train/valid set, third and fourth rows are same but for test set
-            normalization_specs = torch.Tensor(normalization_specs).to(device)
-            encoder.eval()
-            rnn.eval()
-            classifier.eval()
-            indexes_chosen = []
-            print("Starting to plot embeddings..")
-            num_plots = 10 # We'll plot 10 times. This number should be even
-            for plot_index in range(num_plots): 
-                # The first num_plots/2 will be for samples right before a CA, and the last num_plots/2 will be for samples that aren't.
-
-                ind = np.random.randint(low=0, high=len(validation_mixed_data_maps)-1)
-                if plot_index < num_plots/2:
-                    # Selects indicies for arrest samples
-                    while len(torch.where(validation_mixed_labels[ind]==1)[0]) < 1 or ind in indexes_chosen: # If there are not 1's in the labels for this sample, meaning this doesn't lead to CA
-                        ind = np.random.randint(low=0, high=len(validation_mixed_data_maps)-1) # Try another random sample
                 
+                # shuffle for this cv:
+                inds = np.arange(len(train_mixed_data_maps))
+                np.random.shuffle(inds)
+                train_mixed_data_maps = train_mixed_data_maps[inds]
+                train_mixed_labels = train_mixed_labels[inds]
+                print("Size of train + valid data: ", train_mixed_data_maps.shape)
+                print("Size of train + valid labels: ", train_mixed_labels.shape)
+
+                validation_mixed_data_maps = train_mixed_data_maps[0:int(0.2*len(train_mixed_data_maps))]
+                validation_mixed_labels = train_mixed_labels[0:int(0.2*len(train_mixed_data_maps))]
+                print("Size of valid data: ", validation_mixed_data_maps.shape)
+                print("Size of valid labels: ", validation_mixed_labels.shape)
+
+                train_mixed_data_maps = train_mixed_data_maps[int(0.2*len(train_mixed_data_maps)):]
+                train_mixed_labels = train_mixed_labels[int(0.2*len(train_mixed_labels)):]
+                print("Size of train data: ", train_mixed_data_maps.shape)
+                print("Size of train labels: ", train_mixed_labels.shape)
+
+
+                if os.path.exists('../ckpt/%s/%s_encoder_checkpoint_%d_Classifier_checkpoint_%d.tar'%(data_type, UNIQUE_ID, encoder_cv, classification_cv)):
+                    checkpoint = torch.load('../ckpt/%s/%s_encoder_checkpoint_%d_Classifier_checkpoint_%d.tar'%(data_type, UNIQUE_ID, encoder_cv, classification_cv))
+                    rnn = RnnPredictor(encoding_size=encoder_hyper_params['encoding_size'], hidden_size=32).to(device)
+                    # 32 is the arbitrary hidden size chosen for the RNN
+                    classifier = LinearClassifier(input_size=32).to(device)
+                    
+                    rnn.load_state_dict(checkpoint['rnn_state_dict'])
+                    classifier.load_state_dict(checkpoint['classifier_state_dict'])
+                    print("Checkpoint loaded for classifier! Encoder cv %d, classifier cv %d"%(encoder_cv, classification_cv))
                 else:
-                    # Selects indicies for non arrest samples
-                    while len(torch.where(validation_mixed_labels[ind]==1)[0]) > 0 or ind in indexes_chosen: # If there are 1's in the labels for this sample, meaning this does lead to CA
-                        ind = np.random.randint(low=0, high=len(validation_mixed_data_maps)-1) # Try another random sample
-                
-                
-                indexes_chosen.append(ind)
-                sample = validation_mixed_data_maps[ind]
-                windows = []
-                for i in range(0, sample.shape[2]-window_size+1, sliding_gap):
-                    # Note: Its assumed the sliding gap, window size, and seq len play nice (i.e. it isn't impossible for the sliding window to reach the end)
-                    windows.append(sample[:, :, i: i+window_size])
-
-
-                with torch.no_grad():
-                    encodings = encoder(torch.stack(windows))
+                    print("TRAINING LINEAR CLASSIFIER")
+                    classifier_train_labels = torch.Tensor([1 in label for label in train_mixed_labels]) # Sets labels for positive samples to 1
+                    classifier_validation_labels = torch.Tensor([1 in label for label in validation_mixed_labels]) # Sets labels for positive samples to 1
+                    classifier_TEST_labels = torch.Tensor([1 in label for label in TEST_mixed_labels]) # Sets labels for positive samples to 1
                     
-                encoding_batch = torch.unsqueeze(encodings, 0) # batch size of 1
 
-                # encoding_batch is of size (1, seq_len, encoding_size) 
-                
-                output, _ = rnn(encoding_batch) # output contains hidden state for each time step. Shape is (batch_size, seq_len, hidden_size). batch_size=1
-                output = output.squeeze() # now of shape (seq_len, hidden_size). Can be thought of as seq_len encodings, each of size hidden_size
-                risk_scores_over_time = torch.nn.Sigmoid()(classifier(output).to('cpu')).detach() # Apply sigmoid because the classifier doesn't apply this because we use BCEWITHLOGITSLOSS in train_linear_classifier
+                    rnn, classifier, valid_auroc, valid_auprc, TEST_auroc, TEST_auprc = train_linear_classifier(X_train=train_mixed_data_maps, y_train=classifier_train_labels, 
+                    X_validation=validation_mixed_data_maps, y_validation=classifier_validation_labels, 
+                    X_TEST=TEST_mixed_data_maps, y_TEST=classifier_TEST_labels,
+                    encoding_size=encoder.encoding_size, batch_size=128, num_pre_positive_encodings=num_pre_positive_encodings, encoder=encoder, return_models=True, return_scores=True, pos_sample_name=pos_sample_name, 
+                    data_type=data_type, classification_cv=classification_cv, encoder_cv=encoder_cv)
 
+                    classifier_validation_aurocs.append(valid_auroc)
+                    classifier_validation_auprcs.append(valid_auprc)
+                    classifier_TEST_aurocs.append(TEST_auroc)
+                    classifier_TEST_auprcs.append(TEST_auprc)
 
-                encodings = encodings.to('cpu')
-                encodings = encodings.detach().numpy().astype(np.float) # Removes gradients and converts to numpy
-                labels = clustering_model.labels_
-                
-
-                # Plot risk score over time
-                fig = plt.figure(figsize=(15, 6))
-                ax = fig.add_subplot(1, 1, 1) # nrows, ncols, index
-                ax.set_facecolor('w')
-                ax.plot(np.arange(len(risk_scores_over_time)), np.array(risk_scores_over_time))
-                #ax.xlabel('Time')
-                ax.set_ylabel('Risk', fontsize=16)
-                #ax.xlabel('Time (Hours)')
-                ax.set_title('Risk Score for %s Sample'%('Normal' if plot_index >= num_plots/2 else 'Arrest'), fontsize=16)
-                
-                
-                ax.set_xlabel('Time (Hours)', fontsize=16)
-                #plt.set_xticks(np.arange(num_hours)*length_of_hour)
-                ax.set_xticklabels(np.arange(7)) # 7 hrs for ICU data
             
-                ax.xaxis.set_tick_params(labelsize=12)
-                ax.yaxis.set_tick_params(labelsize=12)
-                
-                plt.savefig('../DONTCOMMITplots/%s/%s/%s_%s_risk_over_time_%d.pdf'%(data_type, UNIQUE_ID, UNIQUE_NAME, 'arrest' if plot_index < num_plots/2 else 'normal', plot_index))
+    print("CLASSIFICATION VALIDATION RESULT OVER CV")
+    print("AUC: %.2f +- %.2f, AUPRC: %.2f +- %.2f"% \
+        (np.mean(classifier_validation_aurocs), 
+        np.std(classifier_validation_aurocs), 
+        np.mean(classifier_validation_auprcs), 
+        np.std(classifier_validation_auprcs)))
 
+    print("CLASSIFICATION TEST RESULT OVER CV")
+    print("AUC: %.2f +- %.2f, AUPRC: %.2f +- %.2f"% \
+        (np.mean(classifier_TEST_aurocs), 
+        np.std(classifier_TEST_aurocs), 
+        np.mean(classifier_TEST_auprcs), 
+        np.std(classifier_TEST_auprcs)))
+                    
+    print("Starting encoding clustering on validation set..")
 
+    if plot_embeddings:
+        encoder.eval()
+        rnn.eval()
+        classifier.eval()
+        indexes_chosen_to_plot = []
+        print("Starting to plot embeddings..")
+        num_plots = 10 # We'll plot 10 times. This number should be even
+        for plot_index in range(num_plots): 
+            # The first num_plots/2 will be for positive samples, and the last num_plots/2 will be for negative samples.
 
-                # Plot heatmap and trajectory scatter plot
-                sample = sample.to(device)
-                # (sample, kmeans_model, encoder, normalization_specs, path, hm_file_name, pca_file_name, device, signal_list, length_of_hour, window_size, sliding_gap)
-                plot_heatmap(sample=sample, clustering_model=clustering_model, encoder=encoder, normalization_specs=normalization_specs, path='./DONTCOMMITplots/', 
-                hm_file_name='%s/%s/%s_%s_trajectory_hm_%d.pdf'%(data_type, UNIQUE_NAME, UNIQUE_ID, 'CA_at_end' if plot_index < num_plots/2 else 'no_CA', plot_index), 
-                device=device, signal_list=signal_list, length_of_hour=60*60/5, window_size=window_size, sliding_gap=window_size)
-
-                plot_pca_trajectory(sample=sample, encoder=encoder, window_size=window_size, device=device, sliding_gap=sliding_gap, kmeans_model=clustering_model, path='./DONTCOMMITplots/', pca_file_name='%s/%s/%s_%s_trajectory_embeddings_%d.pdf'%(data_type, UNIQUE_ID, UNIQUE_NAME, 'CA_at_end' if plot_index < num_plots/2 else 'no_CA', plot_index))
-
-
-                sample = sample.to('cpu') # Take off GPU memory
-
-            print("Done plotting embeddings.")
+            ind = np.random.randint(low=0, high=len(validation_mixed_data_maps)-1)
+            if plot_index < num_plots/2:
+                # Selects indicies for arrest samples
+                while len(torch.where(validation_mixed_labels[ind]==1)[0]) < 1 or ind in indexes_chosen_to_plot: # If there are not 1's in the labels for this sample, meaning this isn't a positive sample
+                    ind = np.random.randint(low=0, high=len(validation_mixed_data_maps)-1) # Try another random sample
             
+            else:
+                # Selects indicies for non arrest samples
+                while len(torch.where(validation_mixed_labels[ind]==1)[0]) > 0 or ind in indexes_chosen_to_plot: # If there are 1's in the labels for this sample, meaning this is a positive sample
+                    ind = np.random.randint(low=0, high=len(validation_mixed_data_maps)-1) # Try another random sample
+            
+            
+            indexes_chosen_to_plot.append(ind)
+
+        indexes_for_clustering = indexes_chosen_to_plot.copy()
+        while len(indexes_for_clustering) < 4*len(indexes_chosen_to_plot):
+            ind = np.random.randint(low=0, high=len(validation_mixed_data_maps)-1)
+            if ind not in indexes_for_clustering:
+                indexes_for_clustering.append(ind)
+        
+        clustering_data_maps = torch.stack([validation_mixed_data_maps[ind] for ind in indexes_for_clustering])
+        # clustering_encodings is of shape (num_samples, num_sliding_windows_per_sample, encoding_size)
+        # encoding_mask is of shape (num_samples, num_sliding_windows_per_sample)
+        clustering_encodings, encoding_mask = encoder.forward_seq(clustering_data_maps, return_encoding_mask=True, sliding_gap=sliding_gap)
+        num_sliding_windows_per_sample = clustering_encodings.shape[1]
+
+        pos_inds = torch.Tensor([1 in validation_mixed_labels[ind] for ind in indexes_for_clustering]).nonzero() # Tensor of indicies of positive samples
+        neg_inds = torch.Tensor([1 not in validation_mixed_labels[ind] for ind in indexes_for_clustering]).nonzero() # Tensor of indicies of negative samples
+        pos_clustering_encodings = clustering_encodings[pos_inds] # shape (num_pos_samples, num_sliding_windows_per_sample, encoding_size)
+        neg_clustering_encodings = clustering_encodings[neg_inds] # shape (num_neg_samples, num_sliding_windows_per_sample, encoding_size
+        pos_encoding_mask = encoding_mask[pos_inds] # shape (num_pos_samples, num_sliding_windows_per_sample)
+        neg_encoding_mask = encoding_mask[neg_inds] # shape (num_neg_samples, num_sliding_windows_per_sample)
+
+        clustering_encodings = clustering_encodings.reshape(-1, clustering_encodings.shape[-1])
+        pos_clustering_encodings = pos_clustering_encodings.reshape(-1, pos_clustering_encodings.shape[-1])
+        neg_clustering_encodings = neg_clustering_encodings.reshape(-1, neg_clustering_encodings.shape[-1])
+        
+        encoding_mask = encoding_mask.reshape(-1,)
+        pos_encoding_mask = pos_encoding_mask.reshape(-1,)
+        neg_encoding_mask = neg_encoding_mask.reshape(-1,)
+
+        pos_inds = torch.cat([torch.arange(ind*num_sliding_windows_per_sample, ind*num_sliding_windows_per_sample + num_sliding_windows_per_sample) for ind in pos_inds]) # Now the indices are ready for the reshaped encodings
+        neg_inds = torch.cat([torch.arange(ind*num_sliding_windows_per_sample, ind*num_sliding_windows_per_sample + num_sliding_windows_per_sample) for ind in neg_inds])
+        
+
+        # Only keep encodings that were not created from fully imputed data
+        clustering_encodings = clustering_encodings[encoding_mask!=-1]
+        pos_clustering_encodings = pos_clustering_encodings[pos_encoding_mask!=-1]
+        neg_clustering_encodings = neg_clustering_encodings[neg_encoding_mask!=-1]
+        pos_inds = pos_inds[pos_encoding_mask!=-1]
+        neg_inds = neg_inds[neg_encoding_mask!=-1]
+
+        clustering_model = AgglomerativeClustering(n_clusters=5).fit(clustering_encodings)
+
+        plt.figure(figsize=(8, 5))
+        plt.hist(clustering_model.labels_, bins=clustering_model.n_clusters, density=False)
+        plt.ylabel('Count')
+        plt.xlabel('State')
+        plt.xticks(ticks=np.arange(clustering_model.n_clusters), labels=np.arange(clustering_model.n_clusters))
+        plt.savefig('../DONTCOMMITplots/%s/%s/%s_mixed_cluster_label_hist.pdf'%(data_type, UNIQUE_ID, unique_name))
+
+        
+        plt.figure(figsize=(8, 5))
+        plt.hist(clustering_model.labels_[neg_inds], bins=clustering_model.n_clusters, density=False)
+        plt.ylabel('Count')
+        plt.xlabel('State')
+        plt.xticks(ticks=np.arange(clustering_model.n_clusters), labels=np.arange(clustering_model.n_clusters))
+        plt.savefig('../DONTCOMMITplots/%s/%s/%s_negative_cluster_label_hist.pdf'%(data_type, UNIQUE_ID, unique_name))
+        
+        plt.figure(figsize=(8, 5))
+        plt.hist(clustering_model.labels_[pos_inds], bins=clustering_model.n_clusters, density=False)
+        plt.ylabel('Count')
+        plt.xlabel('State')
+        plt.xticks(ticks=np.arange(clustering_model.n_clusters), labels=np.arange(clustering_model.n_clusters))
+        plt.savefig('../DONTCOMMITplots/%s/%s/%s_positive_cluster_label_hist.pdf'%(data_type, UNIQUE_ID, unique_name))
+
+
+        
+        # First, we'll plot embeddings of samples from the validation set, with labels from the kmeans model. This will produce a plot for arrest samples, a plot for normal samples, and a plot with mixed.
+        PCA_valid_dataset_kmeans_labels(normal_encodings=neg_clustering_encodings, ca_encodings=pos_clustering_encodings, mixed_encodings=clustering_encodings,
+                                        normal_cluster_labels=clustering_model.labels_[neg_inds], arrest_cluster_labels=clustering_model.labels_[pos_inds],
+                                        mixed_cluster_labels=clustering_model.labels_,
+                                        data_type=data_type, unique_name=UNIQUE_NAME, unique_id=UNIQUE_ID)
+
+        
+        print("Sliding Window: ", sliding_gap)
+
+
+        
+        normalization_specs = np.load(os.path.join(path, 'normalization_specs.npy'))
+        # normalization_specs is of shape (4, num_features). First and second rows are means and stdvs for each feature for train/valid set, third and fourth rows are same but for test set
+        normalization_specs = torch.Tensor(normalization_specs).to(device)
+
+
+        for ind in indexes_chosen_to_plot:
+            sample = validation_mixed_data_maps[ind]
+            windows = []
+            for i in range(0, sample.shape[2]-window_size+1, sliding_gap):
+                # Note: Its assumed the sliding gap, window size, and seq len play nice (i.e. it isn't impossible for the sliding window to reach the end)
+                windows.append(sample[:, :, i: i+window_size])
+
+
+            with torch.no_grad():
+                encodings = encoder(torch.stack(windows))
+                
+            encoding_batch = torch.unsqueeze(encodings, 0) # batch size of 1
+
+            # encoding_batch is of size (1, seq_len, encoding_size) 
+            
+            output, _ = rnn(encoding_batch) # output contains hidden state for each time step. Shape is (batch_size, seq_len, hidden_size). batch_size=1
+            output = output.squeeze() # now of shape (seq_len, hidden_size). Can be thought of as seq_len hidden states, each of size hidden_size
+            risk_scores_over_time = torch.nn.Sigmoid()(classifier(output).to('cpu')).detach() # Apply sigmoid because the classifier doesn't apply this because we use BCEWITHLOGITSLOSS in train_linear_classifier
+
+
+            encodings = encodings.to('cpu')
+            encodings = encodings.detach().numpy().astype(np.float) # Removes gradients and converts to numpy
+            labels = clustering_model.labels_
+            
+
+            # Plot risk score over time
+            fig = plt.figure(figsize=(15, 6))
+            ax = fig.add_subplot(1, 1, 1) # nrows, ncols, index
+            ax.set_facecolor('w')
+            ax.plot(np.arange(len(risk_scores_over_time)), np.array(risk_scores_over_time))
+            #ax.xlabel('Time')
+            ax.set_ylabel('Risk', fontsize=16)
+            #ax.xlabel('Time (Hours)')
+            ax.set_title('Risk Score for %s Sample'%('Normal' if plot_index >= num_plots/2 else 'Arrest'), fontsize=16)
+            
+            
+            ax.set_xlabel('Time (Hours)', fontsize=16)
+            #plt.set_xticks(np.arange(num_hours)*length_of_hour)
+            ax.set_xticklabels(np.arange(7)) # 7 hrs for ICU data
+        
+            ax.xaxis.set_tick_params(labelsize=12)
+            ax.yaxis.set_tick_params(labelsize=12)
+            
+            plt.savefig('../DONTCOMMITplots/%s/%s/%s_%s_risk_over_time_%d.pdf'%(data_type, UNIQUE_ID, UNIQUE_NAME, 'arrest' if plot_index < num_plots/2 else 'normal', plot_index))
+
+
+
+            # Plot heatmap and trajectory scatter plot
+            sample = sample.to(device)
+            # (sample, kmeans_model, encoder, normalization_specs, path, hm_file_name, pca_file_name, device, signal_list, length_of_hour, window_size, sliding_gap)
+            plot_heatmap(sample=sample, clustering_model=clustering_model, encoder=encoder, normalization_specs=normalization_specs, path='../DONTCOMMITplots/', 
+            hm_file_name='%s/%s/%s_%s_trajectory_hm_%d.pdf'%(data_type, UNIQUE_ID, UNIQUE_NAME, 'CA_at_end' if plot_index < num_plots/2 else 'no_CA', plot_index), 
+            device=device, signal_list=signal_list, length_of_hour=length_of_hour, window_size=window_size, sliding_gap=window_size)
+
+            plot_pca_trajectory(sample=sample, encoder=encoder, window_size=window_size, device=device, sliding_gap=sliding_gap, kmeans_model=clustering_model, path='../DONTCOMMITplots/', pca_file_name='%s/%s/%s_%s_trajectory_embeddings_%d.pdf'%(data_type, UNIQUE_ID, UNIQUE_NAME, 'CA_at_end' if plot_index < num_plots/2 else 'no_CA', plot_index))
+
+
+            sample = sample.to('cpu') # Take off GPU memory
+
+        print("Done plotting embeddings.")
         
     
-    print("Finished running on ", datetime.now())
+
+print("Finished running on ", datetime.now())
     
 if __name__ == '__main__':
     print("STARTED RUNNING")
