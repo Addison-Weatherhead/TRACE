@@ -1028,6 +1028,7 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                 indexes_for_clustering.append(ind)
         
         clustering_data_maps = torch.stack([validation_mixed_data_maps[ind] for ind in indexes_for_clustering])
+        
         # clustering_encodings is of shape (num_samples, num_sliding_windows_per_sample, encoding_size)
         # encoding_mask is of shape (num_samples, num_sliding_windows_per_sample)
         clustering_encodings, encoding_mask = encoder.forward_seq(clustering_data_maps, return_encoding_mask=True, sliding_gap=sliding_gap)
@@ -1040,12 +1041,12 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
         pos_encoding_mask = encoding_mask[pos_inds] # shape (num_pos_samples, num_sliding_windows_per_sample)
         neg_encoding_mask = encoding_mask[neg_inds] # shape (num_neg_samples, num_sliding_windows_per_sample)
 
-        clustering_encodings = clustering_encodings.reshape(-1, clustering_encodings.shape[-1])
+        clustering_encodings = clustering_encodings.reshape(-1, clustering_encodings.shape[-1]) # of shape (num_samples*num_sliding_windows_per_sample, encoding_size)
         pos_clustering_encodings = pos_clustering_encodings.reshape(-1, pos_clustering_encodings.shape[-1])
         neg_clustering_encodings = neg_clustering_encodings.reshape(-1, neg_clustering_encodings.shape[-1])
         
-        encoding_mask = encoding_mask.reshape(-1,)
-        pos_encoding_mask = pos_encoding_mask.reshape(-1,)
+        encoding_mask = encoding_mask.reshape(-1,) # of shape (num_samples*num_sliding_windows_per_sample)
+        pos_encoding_mask = pos_encoding_mask.reshape(-1,) # of shape (num_pos_samples*num_sliding_windows_per_sample)
         neg_encoding_mask = neg_encoding_mask.reshape(-1,)
 
         pos_inds = torch.cat([torch.arange(ind*num_sliding_windows_per_sample, ind*num_sliding_windows_per_sample + num_sliding_windows_per_sample) for ind in pos_inds]) # Now the indices are ready for the reshaped encodings
