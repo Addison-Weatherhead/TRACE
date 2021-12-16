@@ -14,6 +14,7 @@ from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 from sklearn.neighbors import KNeighborsClassifier
 import hdbscan
+from scipy.cluster.hierarchy import dendrogram
 
 def create_simulated_dataset(window_size=50, path='./data/simulated_data/', batch_size=100):
     if not os.listdir(path):
@@ -297,60 +298,99 @@ def trend_decompose(x, filter_size):
     plt.show()
 
 
-def PCA_valid_dataset_kmeans_labels(normal_encodings, ca_encodings, mixed_encodings, normal_cluster_labels, arrest_cluster_labels, mixed_cluster_labels, data_type, unique_name, unique_id):
-
+def dim_reduction_mixed_clusters(negative_encodings, positive_encodings, negative_cluster_labels, positive_cluster_labels, data_type, unique_name, unique_id):
     colors = ['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w']
+    
+    # TRAIN ON MIXED, NOT JUST NEG AND POS
+
+    mixed_encodings = np.vstack([positive_encodings, negative_encodings])
+    mixed_cluster_labels = np.concatenate([positive_cluster_labels, negative_cluster_labels])
+    pos_inds = np.arange(len(positive_encodings))
+    neg_inds = np.arange(len(positive_encodings), len(mixed_encodings))
 
     # PLOTTING NORMAL PLOT
-    pca = PCA(n_components=2)
-    pca.fit(normal_encodings)
-    labels = normal_cluster_labels
+    embeddings = TSNE(n_components=2).fit_transform(mixed_encodings)
+    labels = negative_cluster_labels
 
-    reduced_normal_encodings = pca.transform(normal_encodings)
-    plt.figure(figsize=(8, 6))    
-    plt.scatter(reduced_normal_encodings[:, 0], reduced_normal_encodings[:, 1], c=[colors[i] for i in labels], label=labels)
+    reduced_negative_encodings = embeddings[neg_inds]
+    plt.figure(figsize=(8, 6))
+    plt.scatter(reduced_negative_encodings[:, 0], reduced_negative_encodings[:, 1], c=[colors[i] for i in labels], label=labels)
     plt.title('Normal Encodings Projected onto 2D')
 
     plt.xlabel('First principal component')
     plt.ylabel('Second principal component')
-    plt.savefig('../DONTCOMMITplots/%s/%s/%s_normal_embeddings.pdf'%(data_type, unique_id, unique_name))
+    plt.savefig('../DONTCOMMITplots/%s/%s/%s_negative_embeddings.pdf'%(data_type, unique_id, unique_name))
 
 
     # PLOTTING ARREST PLOT
-    pca = PCA(n_components=2)
-    pca.fit(ca_encodings)
-    labels = arrest_cluster_labels
+    labels = positive_cluster_labels
 
-    reduced_ca_encodings = pca.transform(ca_encodings)
+    reduced_positive_encodings = embeddings[pos_inds]
+    plt.figure(figsize=(8, 6))
+    plt.scatter(reduced_positive_encodings[:, 0], reduced_positive_encodings[:, 1], c=[colors[i] for i in labels], label=labels)
+    plt.title('Positive Encodings Projected onto 2D')
+
+    plt.xlabel('First principal component')
+    plt.ylabel('Second principal component')
+    plt.savefig('../DONTCOMMITplots/%s/%s/%s_positive_embeddings.pdf'%(data_type, unique_id, unique_name))
+
+
+    # PLOTTING MIXED PLOT
+    labels = mixed_cluster_labels
+
+    reduced_mixed_encodings = mixed_encodings
     plt.figure(figsize=(8, 6))    
-    plt.scatter(reduced_ca_encodings[:, 0], reduced_ca_encodings[:, 1], c=[colors[i] for i in labels], label=labels)
+    plt.scatter(reduced_mixed_encodings[:, 0], reduced_mixed_encodings[:, 1], c=[colors[i] for i in labels], label=labels)
+    plt.title('Positive and Negative Encodings Projected onto 2D')
+
+    plt.xlabel('First principal component')
+    plt.ylabel('Second principal component')
+    plt.savefig('../DONTCOMMITplots/%s/%s/%s_positive_and_negative_embeddings.pdf'%(data_type, unique_id, unique_name))
+    
+def dim_reduction_positive_clusters(positive_encodings, positive_cluster_labels, data_type, unique_name, unique_id):
+    colors = ['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w']
+    
+    reduced_positive_encodings = TSNE(n_components=2).fit_transform(positive_encodings)
+    labels = positive_cluster_labels
+
+    plt.figure(figsize=(8, 6))    
+    plt.scatter(reduced_positive_encodings[:, 0], reduced_positive_encodings[:, 1], c=[colors[i] for i in labels], label=labels)
     plt.title('Arrest Encodings Projected onto 2D')
 
     plt.xlabel('First principal component')
     plt.ylabel('Second principal component')
-    plt.savefig('../DONTCOMMITplots/%s/%s/%s_arrest_embeddings.pdf'%(data_type, unique_id, unique_name))
-
-
-    # PLOTTING MIXED PLOT
-    pca = PCA(n_components=2)
-    pca.fit(mixed_encodings)
-    labels = mixed_cluster_labels
-
-    reduced_mixed_encodings = pca.transform(mixed_encodings)
-    plt.figure(figsize=(8, 6))    
-    plt.scatter(reduced_mixed_encodings[:, 0], reduced_mixed_encodings[:, 1], c=[colors[i] for i in labels], label=labels)
-    plt.title('Arrest and Normal Encodings Projected onto 2D')
-
-    plt.xlabel('First principal component')
-    plt.ylabel('Second principal component')
-    plt.savefig('../DONTCOMMITplots/%s/%s/%s_arrest_and_normal_embeddings.pdf'%(data_type, unique_id, unique_name))
-    
+    plt.savefig('../DONTCOMMITplots/%s/%s/%s_positive_trained_clustering_positive_embeddings.pdf'%(data_type, unique_id, unique_name))
 
 
 
+def plot_dendrogram(model, title, file_name, **kwargs):
+    # Create linkage matrix and then plot the dendrogram
+
+    # create the counts of samples under each node
+    counts = np.zeros(model.children_.shape[0])
+    n_samples = len(model.labels_)
+    for i, merge in enumerate(model.children_):
+        current_count = 0
+        for child_idx in merge:
+            if child_idx < n_samples:
+                current_count += 1  # leaf node
+            else:
+                current_count += counts[child_idx - n_samples]
+        counts[i] = current_count
+
+    linkage_matrix = np.column_stack(
+        [model.children_, model.distances_, counts]
+    ).astype(float)
+
+    # Plot the corresponding dendrogram
+    plt.figure(figsize=(10, 5))
+    plt.title(title)
+    dendrogram(linkage_matrix, **kwargs)
+    plt.savefig(file_name)
 
 
-def plot_normal_and_mortality(normal_data_maps, mortality_data_maps, mortality_labels, encoder, device, window_size, data_type, unique_name, unique_id):
+
+def plot_negative_and_mortality(negative_data_maps, mortality_data_maps, mortality_labels, encoder, device, window_size, data_type, unique_name, unique_id):
     mortality_samples = []
 
     for i in range(len(mortality_labels)):
@@ -358,22 +398,22 @@ def plot_normal_and_mortality(normal_data_maps, mortality_data_maps, mortality_l
             low = np.random.randint(0, mortality_data_maps.shape[-1]-window_size)
             mortality_samples.append(torch.Tensor(mortality_data_maps[i, :, :, low: low+window_size]))
 
-    normal_samples = []
+    negative_samples = []
 
-    for i in range(len(normal_data_maps)):
-        low = np.random.randint(0, normal_data_maps.shape[-1]-window_size)
-        normal_samples.append(torch.Tensor(normal_data_maps[i, :, :, low: low+window_size]))
+    for i in range(len(negative_data_maps)):
+        low = np.random.randint(0, negative_data_maps.shape[-1]-window_size)
+        negative_samples.append(torch.Tensor(negative_data_maps[i, :, :, low: low+window_size]))
 
             
     mortality_samples = torch.stack(mortality_samples).to(device)
-    normal_samples = torch.stack(normal_samples).to(device)
+    negative_samples = torch.stack(negative_samples).to(device)
 
     mortality_encodings = encoder(mortality_samples).to('cpu').detach().numpy()
-    normal_encodings = encoder(normal_samples).to('cpu').detach().numpy()
+    negative_encodings = encoder(negative_samples).to('cpu').detach().numpy()
     
-    encodings = np.vstack([normal_encodings, mortality_encodings])
-    labels = np.ones(len(normal_encodings) + len(mortality_encodings))
-    labels[0:len(normal_encodings)] = 0
+    encodings = np.vstack([negative_encodings, mortality_encodings])
+    labels = np.ones(len(negative_encodings) + len(mortality_encodings))
+    labels[0:len(negative_encodings)] = 0
 
     pca = PCA(n_components=2)
     pca.fit(encodings)
@@ -386,9 +426,9 @@ def plot_normal_and_mortality(normal_data_maps, mortality_data_maps, mortality_l
     colors = []
     for i in labels:
         if i == 0:
-            colors.append("Black") # normal patients
+            colors.append("Black") # negative patients
         elif i == 1:
-            colors.append("Red")  # Pre arrest window patients
+            colors.append("Red")  # Pre positive window patients
         
 
     scatter = plt.scatter(reduced_encodings[:, 0], reduced_encodings[:, 1], c=colors, label=labels)
@@ -397,5 +437,5 @@ def plot_normal_and_mortality(normal_data_maps, mortality_data_maps, mortality_l
 
     plt.xlabel('First principal component')
     plt.ylabel('Second principal component')
-    plt.savefig('../DONTCOMMITplots/%s/%s/%s_mortality_and_normal_embeddings.pdf'%(data_type, unique_id, unique_name))
+    plt.savefig('../DONTCOMMITplots/%s/%s/%s_mortality_and_negative_embeddings.pdf'%(data_type, unique_id, unique_name))
     plt.close()

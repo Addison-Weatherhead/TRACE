@@ -5,46 +5,113 @@ import matplotlib.pyplot as plt
 import argparse
 import math
 import seaborn as sns; sns.set()
-import sys
-import numpy as np
-import pickle
-import os
 import random
-os.environ['MKL_THREADING_LAYER'] = 'GNU' # Set this value to allow grid_search.py to work.
-from sklearn.metrics import silhouette_score, davies_bouldin_score
-from sklearn.cluster import KMeans
-from datetime import datetime
-from tnc.models import CNN_Transformer_Encoder, EncoderMultiSignalMIMIC, GRUDEncoder, RnnEncoder, WFEncoder, TST, EncoderMultiSignal, LinearClassifier, RnnPredictor, EncoderMultiSignalMIMIC, CausalCNNEncoder
-from tnc.utils import plot_distribution, plot_heatmap, PCA_valid_dataset_kmeans_labels, plot_normal_and_mortality, plot_pca_trajectory
-from tnc.evaluations import WFClassificationExperiment, ClassificationPerformanceExperiment
-#from statsmodels.tsa.stattools import adfuller, acf
-from sklearn.decomposition import PCA
-from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, classification_report
-import hdbscan
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-import torch.nn.functional as F
-x = torch.randn(10, 2, 10, 5040)
-print(x.shape)
+random.seed(0)
 
 
-encoder = CausalCNNEncoder(in_channels=20, channels=8, depth=2, reduced_size=60, encoding_size=16, kernel_size=3, window_size=120, device=device)
+clustering_encodings = torch.Tensor([[[ -1,  -7],
+         [  5,  -4],
+         [ -4,   0],
+         [  8,   9],
+         [ -1,  -4]],
+
+        [[ -4,  -7],
+         [  0,   0],
+         [  0,   2],
+         [ -1,  11],
+         [ -1,  -4]],
+
+        [[ -7,   7],
+         [ -3,   1],
+         [ -2,  -5],
+         [ -9,  -8],
+         [  4,   9]],
+
+        [[  7,   2],
+         [ 12,   0],
+         [  7,   2],
+         [-10,  -6],
+         [ -7,   4]]])
+encoding_mask = torch.ones(4, 5)
+encoding_mask[0, 0:2] = -1
+encoding_mask[1, 0:3] = -1
+encoding_mask[2, 0] = -1
+encoding_mask[3, 0:3] = -1
+
+print('Encodings: ')
+print(clustering_encodings)
+
+print('Encoding Mask: ')
+
+print(encoding_mask)
 
 
-out, encoding_mask = encoder.forward_seq(x, sliding_gap=20, return_encoding_mask=True)
-out = out.reshape(-1, 16)
-print('encodings shape:')
-print(out.shape)
-print('encodings mask shape:')
-print(encoding_mask.shape)
+labels = torch.zeros(4, 5)
 
-encodings = []
-for i in range(0, 5040-120, 20):
-    encodings.append(encoder(x[:, :, :, i: i+120]))
+labels[0, 4] = 1
+labels[3, 4] = 1
+labels[3, 3] = 1
 
-encodings = torch.stack(encodings).permute(1, 0, 2).reshape(-1, 16)
+print('Labels: ')
+print(labels)
 
-print(encodings.shape)
+pos_inds = torch.Tensor([1 in labels[ind] for ind in range(labels.shape[0])]).nonzero()
+neg_inds = torch.Tensor([1 not in labels[ind] for ind in range(labels.shape[0])]).nonzero()
 
-print(encodings - out)
+print(pos_inds)
+print(neg_inds)
+
+print('========================================================')
+
+num_sliding_windows_per_sample = 5
+
+
+
+
+
+pos_clustering_encodings = clustering_encodings[pos_inds] # shape (num_pos_samples, num_sliding_windows_per_sample, encoding_size)
+neg_clustering_encodings = clustering_encodings[neg_inds] # shape (num_neg_samples, num_sliding_windows_per_sample, encoding_size
+pos_encoding_mask = encoding_mask[pos_inds] # shape (num_pos_samples, num_sliding_windows_per_sample)
+neg_encoding_mask = encoding_mask[neg_inds] # shape (num_neg_samples, num_sliding_windows_per_sample)
+
+
+clustering_encodings = clustering_encodings.reshape(-1, clustering_encodings.shape[-1]) # of shape (num_samples*num_sliding_windows_per_sample, encoding_size)
+pos_clustering_encodings = pos_clustering_encodings.reshape(-1, pos_clustering_encodings.shape[-1])
+neg_clustering_encodings = neg_clustering_encodings.reshape(-1, neg_clustering_encodings.shape[-1])
+
+
+
+encoding_mask = encoding_mask.reshape(-1,) # of shape (num_samples*num_sliding_windows_per_sample)
+pos_encoding_mask = pos_encoding_mask.reshape(-1,) # of shape (num_pos_samples*num_sliding_windows_per_sample)
+neg_encoding_mask = neg_encoding_mask.reshape(-1,)
+
+pos_inds = torch.cat([torch.arange(int(ind)*num_sliding_windows_per_sample, int(ind)*num_sliding_windows_per_sample + num_sliding_windows_per_sample) for ind in pos_inds]) # Now the indices are ready for the reshaped encodings
+neg_inds = torch.cat([torch.arange(int(ind)*num_sliding_windows_per_sample, int(ind)*num_sliding_windows_per_sample + num_sliding_windows_per_sample) for ind in neg_inds])
+
+
+
+# Only keep encodings that were not created from fully imputed data
+masked_clustering_encodings = clustering_encodings[encoding_mask!=-1].detach().to('cpu')
+pos_clustering_encodings = pos_clustering_encodings[pos_encoding_mask!=-1].detach().to('cpu')
+neg_clustering_encodings = neg_clustering_encodings[neg_encoding_mask!=-1].detach().to('cpu')
+pos_inds = pos_inds[pos_encoding_mask!=-1]
+neg_inds = neg_inds[neg_encoding_mask!=-1]
+
+all_inds = torch.sort(torch.cat([pos_inds, neg_inds]))[0]
+print(all_inds)
+
+masked_pos_inds = torch.nonzero(pos_inds[:, None] == all_inds[None, :])[:, 1]
+masked_neg_inds = torch.nonzero(neg_inds[:, None] == all_inds[None, :])[:, 1] # Now masked_pos_inds and masked_neg_inds can index masked_clustering_encodings
+
+print(masked_clustering_encodings)
+print(pos_clustering_encodings)
+print(neg_clustering_encodings)
+print(pos_inds)
+print(neg_inds)
+print()
+
+print(masked_clustering_encodings[masked_pos_inds])
+print(masked_clustering_encodings[masked_neg_inds])
+
 

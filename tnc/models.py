@@ -1606,7 +1606,8 @@ class CausalCNNEncoder(torch.nn.Module):
         if sliding_gap:
             # This is a tensor of indices. If the data is of shape (num_samples, 2, num_features, 10), and window_size = 4 and sliding_gap=2, then inds is an array
             # of [0, 1, 2, 3, 2, 3, 4, 5, 4, 5, 6, 7, 6, 7, 8, 9]
-            inds = torch.cat([torch.arange(ind, ind+self.window_size) for ind in range(0, x.shape[-1]-self.window_size, sliding_gap)])
+            inds = torch.cat([torch.arange(ind, ind+self.window_size) for ind in range(0, x.shape[-1]-self.window_size+1, sliding_gap)])
+            
             # Now for each sample we have the window_size windows concatenated for each sliding gap on the last axis.
             # So if window_size is 120 and sliding_gap is 20, then for each sample, the time dimension will go 
             # [0, 1, 2, ..., 119, 20, 21, ..., 139, 140, ...]

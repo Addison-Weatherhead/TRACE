@@ -20,12 +20,13 @@ from sklearn.metrics import silhouette_score, davies_bouldin_score
 from sklearn.cluster import AgglomerativeClustering
 from datetime import datetime
 from tnc.models import CNN_Transformer_Encoder, EncoderMultiSignalMIMIC, GRUDEncoder, RnnEncoder, WFEncoder, TST, EncoderMultiSignal, LinearClassifier, RnnPredictor, EncoderMultiSignalMIMIC, CausalCNNEncoder
-from tnc.utils import plot_heatmap, PCA_valid_dataset_kmeans_labels, plot_normal_and_mortality, plot_pca_trajectory
+from tnc.utils import plot_heatmap, dim_reduction_mixed_clusters, dim_reduction_positive_clusters, plot_pca_trajectory, plot_dendrogram
 from tnc.evaluations import WFClassificationExperiment, ClassificationPerformanceExperiment
 from statsmodels.tsa import stattools
 from sklearn.decomposition import PCA
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, classification_report
 import hdbscan
+
 
 import yaml
 
@@ -848,7 +849,7 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
         pos_sample_name = 'arrest'
         path = '/datasets/sickkids/TNC_ICU_data/'
         signal_list = ["Pulse", "HR", "SpO2", "etCO2", "NBPm", "NBPd", "NBPs", "RR", "CVPm", "awRR"]
-        sliding_gap = 20
+        sliding_gap = int(((60*60/5)/6)/5) # equal to 24. 1 hr in this time freq, dividided by 6 (10 min) divided by 5 (2 min). 
         pre_positive_window = int(2*(60*60/5))
         num_pre_positive_encodings = int(pre_positive_window/window_size)
 
@@ -881,7 +882,7 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
 
     elif data_type == 'HiRID':
         window_size = learn_encoder_hyper_params['window_size']
-        length_of_hour = (60*60)/300 # 60 seconds * 60 / 300 (which is num seconds in 5 min)
+        length_of_hour = int((60*60)/300) # 60 seconds * 60 / 300 (which is num seconds in 5 min)
         pos_sample_name = 'mortality'
         path = '../DONTCOMMITdata/hirid_numpy'
         signal_list = ['vm1', 'vm3', 'vm4', 'vm5', 'vm13', 'vm20', 'vm28', 'vm62', 'vm136', 'vm146', 'vm172', 'vm174', 'vm176', 'pm41', 'pm42', 'pm43', 'pm44', 'pm87']
@@ -1018,7 +1019,6 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                 while len(torch.where(validation_mixed_labels[ind]==1)[0]) > 0 or ind in indexes_chosen_to_plot: # If there are 1's in the labels for this sample, meaning this is a positive sample
                     ind = np.random.randint(low=0, high=len(validation_mixed_data_maps)-1) # Try another random sample
             
-            
             indexes_chosen_to_plot.append(ind)
 
         indexes_for_clustering = indexes_chosen_to_plot.copy()
@@ -1027,40 +1027,63 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
             if ind not in indexes_for_clustering:
                 indexes_for_clustering.append(ind)
         
-        clustering_data_maps = torch.stack([validation_mixed_data_maps[ind] for ind in indexes_for_clustering])
-        
+        clustering_data_maps = torch.stack([validation_mixed_data_maps[ind] for ind in indexes_for_clustering]).squeeze()
+        pos_inds = torch.Tensor([1 in validation_mixed_labels[ind] for ind in indexes_for_clustering]).nonzero().reshape(-1,) # Tensor of indicies of positive samples
+        neg_inds = torch.Tensor([1 not in validation_mixed_labels[ind] for ind in indexes_for_clustering]).nonzero().reshape(-1,) # Tensor of indicies of negative samples
+        print('num positive: ', len(pos_inds))
         # clustering_encodings is of shape (num_samples, num_sliding_windows_per_sample, encoding_size)
         # encoding_mask is of shape (num_samples, num_sliding_windows_per_sample)
-        clustering_encodings, encoding_mask = encoder.forward_seq(clustering_data_maps, return_encoding_mask=True, sliding_gap=sliding_gap)
-        num_sliding_windows_per_sample = clustering_encodings.shape[1]
-
-        pos_inds = torch.Tensor([1 in validation_mixed_labels[ind] for ind in indexes_for_clustering]).nonzero() # Tensor of indicies of positive samples
-        neg_inds = torch.Tensor([1 not in validation_mixed_labels[ind] for ind in indexes_for_clustering]).nonzero() # Tensor of indicies of negative samples
-        pos_clustering_encodings = clustering_encodings[pos_inds] # shape (num_pos_samples, num_sliding_windows_per_sample, encoding_size)
-        neg_clustering_encodings = clustering_encodings[neg_inds] # shape (num_neg_samples, num_sliding_windows_per_sample, encoding_size
-        pos_encoding_mask = encoding_mask[pos_inds] # shape (num_pos_samples, num_sliding_windows_per_sample)
-        neg_encoding_mask = encoding_mask[neg_inds] # shape (num_neg_samples, num_sliding_windows_per_sample)
-
-        clustering_encodings = clustering_encodings.reshape(-1, clustering_encodings.shape[-1]) # of shape (num_samples*num_sliding_windows_per_sample, encoding_size)
-        pos_clustering_encodings = pos_clustering_encodings.reshape(-1, pos_clustering_encodings.shape[-1])
-        neg_clustering_encodings = neg_clustering_encodings.reshape(-1, neg_clustering_encodings.shape[-1])
+        pos_clustering_encodings, pos_encoding_mask = encoder.forward_seq(clustering_data_maps[pos_inds][:, :, :, -pre_positive_window:], return_encoding_mask=True, sliding_gap=sliding_gap)
         
-        encoding_mask = encoding_mask.reshape(-1,) # of shape (num_samples*num_sliding_windows_per_sample)
-        pos_encoding_mask = pos_encoding_mask.reshape(-1,) # of shape (num_pos_samples*num_sliding_windows_per_sample)
-        neg_encoding_mask = neg_encoding_mask.reshape(-1,)
+        neg_clustering_encodings, neg_encoding_mask = encoder.forward_seq(clustering_data_maps[neg_inds], return_encoding_mask=True, sliding_gap=sliding_gap)
 
-        pos_inds = torch.cat([torch.arange(ind*num_sliding_windows_per_sample, ind*num_sliding_windows_per_sample + num_sliding_windows_per_sample) for ind in pos_inds]) # Now the indices are ready for the reshaped encodings
-        neg_inds = torch.cat([torch.arange(ind*num_sliding_windows_per_sample, ind*num_sliding_windows_per_sample + num_sliding_windows_per_sample) for ind in neg_inds])
+        # clustering_encodings = torch.vstack([pos_clustering_encodings, neg_clustering_encodings])
+        # encoding_mask = torch.vstack([pos_encoding_mask, neg_encoding_mask])
+        num_encodings_per_neg_sample = neg_clustering_encodings.shape[1] # 205 for ICU data with sliding gap 24
+        num_encodings_per_pos_sample = pos_clustering_encodings.shape[1] # 56 for ICU data with sliding gap 24. Note this is only for data with 
+
+        #pos_inds = torch.arange(len(pos_clustering_encodings))
+        #neg_inds = torch.arange(len(pos_clustering_encodings), len(neg_clustering_encodings))
+
+
+        reshaped_pos_clustering_encodings = pos_clustering_encodings.reshape(-1, pos_clustering_encodings.shape[-1])
+        reshaped_neg_clustering_encodings = neg_clustering_encodings.reshape(-1, neg_clustering_encodings.shape[-1])
         
+        reshaped_pos_encoding_mask = pos_encoding_mask.reshape(-1,) # of shape (num_pos_samples*num_sliding_windows_per_sample)
+        reshaped_neg_encoding_mask = neg_encoding_mask.reshape(-1,)
+
+        #pos_inds = torch.cat([torch.arange(int(ind)*num_sliding_windows_per_sample, int(ind)*num_sliding_windows_per_sample + num_sliding_windows_per_sample) for ind in pos_inds]) # Now the indices are ready for the reshaped encodings
+        #neg_inds = torch.cat([torch.arange(int(ind)*num_sliding_windows_per_sample, int(ind)*num_sliding_windows_per_sample + num_sliding_windows_per_sample) for ind in neg_inds])
+        
+
+        #assert torch.equal(clustering_encodings[pos_inds], pos_clustering_encodings)
+        #assert torch.equal(clustering_encodings[neg_inds], neg_clustering_encodings)
 
         # Only keep encodings that were not created from fully imputed data
-        clustering_encodings = clustering_encodings[encoding_mask!=-1]
-        pos_clustering_encodings = pos_clustering_encodings[pos_encoding_mask!=-1]
-        neg_clustering_encodings = neg_clustering_encodings[neg_encoding_mask!=-1]
-        pos_inds = pos_inds[pos_encoding_mask!=-1]
-        neg_inds = neg_inds[neg_encoding_mask!=-1]
+        #masked_clustering_encodings = clustering_encodings[encoding_mask!=-1].detach().to('cpu')
+        masked_pos_clustering_encodings = reshaped_pos_clustering_encodings[reshaped_pos_encoding_mask!=-1].detach().to('cpu')
+        masked_neg_clustering_encodings = reshaped_neg_clustering_encodings[reshaped_neg_encoding_mask!=-1].detach().to('cpu')
+        #pos_inds = pos_inds[pos_encoding_mask!=-1].detach().to('cpu')
+        #neg_inds = neg_inds[neg_encoding_mask!=-1].detach().to('cpu')
 
-        clustering_model = AgglomerativeClustering(n_clusters=5).fit(clustering_encodings)
+        #all_inds = torch.sort(torch.cat([pos_inds, neg_inds]))[0] # Puts together the negative and positive indices, and sorts them. Note the result is not just an arange(), since we've removed some indices with the mask
+
+        # masked_pos_inds and masked_neg_inds can index masked_clustering_encodings
+        #masked_pos_inds = torch.nonzero(pos_inds[:, None] == all_inds[None, :])[:, 1]
+        #masked_neg_inds = torch.nonzero(neg_inds[:, None] == all_inds[None, :])[:, 1] 
+        
+        masked_clustering_encodings = torch.vstack([masked_pos_clustering_encodings, masked_neg_clustering_encodings])
+        
+        masked_pos_inds = torch.arange(len(masked_pos_clustering_encodings))
+        masked_neg_inds = torch.arange(len(masked_pos_clustering_encodings), len(masked_clustering_encodings))
+        print(masked_pos_inds)
+        clustering_model = AgglomerativeClustering(n_clusters=8, linkage='complete', affinity='cosine', compute_distances=True).fit(masked_clustering_encodings)
+        positive_clustering_model = AgglomerativeClustering(n_clusters=8, linkage='complete', affinity='cosine', compute_distances=True).fit(masked_clustering_encodings[masked_pos_inds])
+
+        # Plot dendogram for both clustering models
+        plot_dendrogram(clustering_model, title='Dendogram for Hierarchichal Clustering Model', file_name='../DONTCOMMITplots/%s/%s/%s_hierarchical_clustering_dendogram.pdf'%(data_type, UNIQUE_ID, UNIQUE_NAME), truncate_mode="level", p=3)
+        plot_dendrogram(positive_clustering_model, title='Dendogram for Hierarchichal Clustering Model (Trained only on positive samples)', 
+        file_name='../DONTCOMMITplots/%s/%s/%s_hierarchical_clustering_positive_trained_dendogram.pdf'%(data_type, UNIQUE_ID, UNIQUE_NAME),truncate_mode="level", p=3)
 
         plt.figure(figsize=(8, 5))
         plt.hist(clustering_model.labels_, bins=clustering_model.n_clusters, density=False)
@@ -1071,14 +1094,14 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
 
         
         plt.figure(figsize=(8, 5))
-        plt.hist(clustering_model.labels_[neg_inds], bins=clustering_model.n_clusters, density=False)
+        plt.hist(clustering_model.labels_[masked_neg_inds], bins=clustering_model.n_clusters, density=False)
         plt.ylabel('Count')
         plt.xlabel('State')
         plt.xticks(ticks=np.arange(clustering_model.n_clusters), labels=np.arange(clustering_model.n_clusters))
         plt.savefig('../DONTCOMMITplots/%s/%s/%s_negative_cluster_label_hist.pdf'%(data_type, UNIQUE_ID, unique_name))
         
         plt.figure(figsize=(8, 5))
-        plt.hist(clustering_model.labels_[pos_inds], bins=clustering_model.n_clusters, density=False)
+        plt.hist(clustering_model.labels_[masked_pos_inds], bins=clustering_model.n_clusters, density=False)
         plt.ylabel('Count')
         plt.xlabel('State')
         plt.xticks(ticks=np.arange(clustering_model.n_clusters), labels=np.arange(clustering_model.n_clusters))
@@ -1086,38 +1109,47 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
 
 
         
-        # First, we'll plot embeddings of samples from the validation set, with labels from the kmeans model. This will produce a plot for arrest samples, a plot for normal samples, and a plot with mixed.
-        PCA_valid_dataset_kmeans_labels(normal_encodings=neg_clustering_encodings, ca_encodings=pos_clustering_encodings, mixed_encodings=clustering_encodings,
-                                        normal_cluster_labels=clustering_model.labels_[neg_inds], arrest_cluster_labels=clustering_model.labels_[pos_inds],
-                                        mixed_cluster_labels=clustering_model.labels_,
+        # First, we'll plot embeddings of samples from the validation set, with labels from the clustering model. This will produce a plot for positive samples, a plot for negative samples, and a plot with mixed.
+        dim_reduction_mixed_clusters(negative_encodings=masked_neg_clustering_encodings, positive_encodings=masked_pos_clustering_encodings,
+                                        negative_cluster_labels=clustering_model.labels_[masked_neg_inds], positive_cluster_labels=clustering_model.labels_[masked_pos_inds],
                                         data_type=data_type, unique_name=UNIQUE_NAME, unique_id=UNIQUE_ID)
 
-        
+        # Now we'll cluster just the positive samples
+        dim_reduction_positive_clusters(positive_encodings=masked_pos_clustering_encodings, positive_cluster_labels=positive_clustering_model.labels_, data_type=data_type, unique_name=UNIQUE_NAME, unique_id=UNIQUE_ID)
+
         print("Sliding Window: ", sliding_gap)
-
-
         
         normalization_specs = np.load(os.path.join(path, 'normalization_specs.npy'))
         # normalization_specs is of shape (4, num_features). First and second rows are means and stdvs for each feature for train/valid set, third and fourth rows are same but for test set
         normalization_specs = torch.Tensor(normalization_specs).to(device)
-
-
-        for ind in indexes_chosen_to_plot:
-            sample = validation_mixed_data_maps[ind]
-            windows = []
-            for i in range(0, sample.shape[2]-window_size+1, sliding_gap):
-                # Note: Its assumed the sliding gap, window size, and seq len play nice (i.e. it isn't impossible for the sliding window to reach the end)
-                windows.append(sample[:, :, i: i+window_size])
-
-
-            with torch.no_grad():
-                encodings = encoder(torch.stack(windows))
+        print('indexes_chosen_to_plot :', indexes_chosen_to_plot)
+        for plot_index, ind in enumerate(indexes_chosen_to_plot):
+            if plot_index < num_plots/2:
+                encodings, mask = encoder.forward_seq(validation_mixed_data_maps[ind], return_encoding_mask=True)
+                num_pos_encodings = pos_clustering_encodings.shape[1] # The number of encodings generated for a positive sample during clustering (its large because of sliding_gap)
+                cluster_labels = positive_clustering_model.labels_[]
                 
-            encoding_batch = torch.unsqueeze(encodings, 0) # batch size of 1
+                #encodings = pos_clustering_encodings[plot_index]
+                #mask = pos_encoding_mask[plot_index]
+
+                
+                print(encodings.shape)
+                print(mask.shape)
+                print(num_pos_encodings)
+                assert 2==1
+                
+                encodings_inds = torch.flip(torch.arange(len(encodings)-1, -1, -int(window_size/sliding_gap)), dims=[0]) # Indices so that we can downsample the frequency of encodings. flip simpy reverses
+                encodings = encodings[encodings_inds] # This is equivalent to if we encoded from the start with sliding_gap=window_size. This way when we plot, we can highlight the signal based on the encoding class (from the clustering)
+                mask = mask[encodings_inds]
+                
+                print(encodings.shape)
+                print(mask.shape)
+                print(encodings_inds)
+                assert 2==1
+
 
             # encoding_batch is of size (1, seq_len, encoding_size) 
-            
-            output, _ = rnn(encoding_batch) # output contains hidden state for each time step. Shape is (batch_size, seq_len, hidden_size). batch_size=1
+            output, _ = rnn(encodings) # output contains hidden state for each time step. Shape is (batch_size, seq_len, hidden_size). batch_size=1
             output = output.squeeze() # now of shape (seq_len, hidden_size). Can be thought of as seq_len hidden states, each of size hidden_size
             risk_scores_over_time = torch.nn.Sigmoid()(classifier(output).to('cpu')).detach() # Apply sigmoid because the classifier doesn't apply this because we use BCEWITHLOGITSLOSS in train_linear_classifier
 
@@ -1153,10 +1185,12 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
             sample = sample.to(device)
             # (sample, kmeans_model, encoder, normalization_specs, path, hm_file_name, pca_file_name, device, signal_list, length_of_hour, window_size, sliding_gap)
             plot_heatmap(sample=sample, clustering_model=clustering_model, encoder=encoder, normalization_specs=normalization_specs, path='../DONTCOMMITplots/', 
-            hm_file_name='%s/%s/%s_%s_trajectory_hm_%d.pdf'%(data_type, UNIQUE_ID, UNIQUE_NAME, 'CA_at_end' if plot_index < num_plots/2 else 'no_CA', plot_index), 
+            hm_file_name='%s/%s/%s_%s_trajectory_hm_%d.pdf'%(data_type, UNIQUE_ID, UNIQUE_NAME, 'positive_sample' if plot_index < num_plots/2 else 'negative_sample', plot_index), 
             device=device, signal_list=signal_list, length_of_hour=length_of_hour, window_size=window_size, sliding_gap=window_size)
 
-            plot_pca_trajectory(sample=sample, encoder=encoder, window_size=window_size, device=device, sliding_gap=sliding_gap, kmeans_model=clustering_model, path='../DONTCOMMITplots/', pca_file_name='%s/%s/%s_%s_trajectory_embeddings_%d.pdf'%(data_type, UNIQUE_ID, UNIQUE_NAME, 'CA_at_end' if plot_index < num_plots/2 else 'no_CA', plot_index))
+            plot_pca_trajectory(sample=sample, encoder=encoder, window_size=window_size, device=device, sliding_gap=sliding_gap, 
+            kmeans_model=clustering_model, path='../DONTCOMMITplots/', 
+            pca_file_name='%s/%s/%s_%s_trajectory_embeddings_%d.pdf'%(data_type, UNIQUE_ID, UNIQUE_NAME, 'CA_at_end' if plot_index < num_plots/2 else 'no_CA', plot_index))
 
 
             sample = sample.to('cpu') # Take off GPU memory
