@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from matplotlib import gridspec
+from matplotlib import axes, gridspec
 from matplotlib.patches import Ellipse
 import matplotlib.transforms as transforms
 
@@ -47,25 +47,9 @@ def create_simulated_dataset(window_size=50, path='./data/simulated_data/', batc
     return train_loader, valid_loader, test_loader
 
 
-def plot_heatmap(sample, clustering_model, encoder, normalization_specs, path, hm_file_name, device, signal_list, length_of_hour, window_size, sliding_gap):
-    _, num_features, seq_len = sample.shape
-
-    
-    encodings = []
-    with torch.no_grad():
-        encoder.to(device)
-        encoder.eval()
-        for t in range(0, seq_len-window_size+1, sliding_gap):
-            window = sample[:, :, t:t+window_size]
-
-            encodings.append(encoder(torch.unsqueeze(window, 0).to(device)).view(-1,)) # Add a dimension of size 1 at beginning so we have a 'batch' of size 1 for the encoder to work with.
-        
-    encodings = torch.stack(encodings, 0).to('cpu').detach().float()
-
-    
-
-
+def plot_heatmap(sample, encodings, cluster_labels, risk_scores, normalization_specs, path, hm_file_name, risk_plot_title, signal_list, length_of_hour, window_size):
     # Since encodings have now been generated, we can un normalize our data for plotting
+    _, num_features, seq_len = sample.shape
     means, stds = normalization_specs[0], normalization_specs[1]
     means = means.reshape(-1, 1)
     stds = stds.reshape(-1, 1)
@@ -88,19 +72,19 @@ def plot_heatmap(sample, clustering_model, encoder, normalization_specs, path, h
         axs[1].xaxis.set_tick_params(labelsize=22)
         axs[1].yaxis.set_tick_params(labelsize=22)
 
-    else: # We'll have num_features plots + 1 for the heatmap
-        f, axs = plt.subplots(num_features + 1)  #
+    else: # We'll have num_features plots + 2: one for the heatmap, one for the risk scores
+        f, axs = plt.subplots(num_features + 2)  #
         f.set_figheight(num_features*7)
         f.set_figwidth(23)
         for feat in range(num_features):
-            sns.lineplot(np.arange(seq_len), sample[0][feat].to('cpu'), ax=axs[feat])
+            sns.lineplot(np.arange(seq_len), sample[0][feat], ax=axs[feat])
 
     for i in range(len(signal_list)):
         axs[i].set_title(signal_list[i], fontsize=30, fontweight='bold')
 
     
     num_hours = int(seq_len/length_of_hour)
-    for i in range(sample.shape[-2] + 1):
+    for i in range(sample.shape[-2] + 2):
         axs[i].set_xlabel('Time (Hours)', fontsize=28)
         
         axs[i].set_xticks(np.arange(num_hours)*length_of_hour)
@@ -112,32 +96,37 @@ def plot_heatmap(sample, clustering_model, encoder, normalization_specs, path, h
         axs[i].margins(x=0)
         axs[i].grid(False)
 
-    try:
-        cluster_labels = hdbscan.approximate_predict(clustering_model, [encoding for encoding in encodings]) # labels are the labels that the clustering model gives to each encoding in the sample
-        if 'ICU' in hm_file_name:
-            for i in range(num_features):
-                t_0 = 0
-                for t in range(1, cluster_labels.shape[-1]):
-                    if cluster_labels[t]==cluster_labels[t-1] and t < cluster_labels.shape[-1] -1: # If the label is the same as the last time step and we're not at the end yet
-                        continue
-                    else:
-                        axs[i].axvspan((t_0)*window_size, (t+1)*window_size, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][int(cluster_labels[t_0])], alpha=0.25)
-                        t_0 = t+1
-    except:
-        pass
+    
+    if 'ICU' in hm_file_name:
+        for i in range(num_features):
+            t_0 = 0
+            for t in range(1, cluster_labels.shape[-1]):
+                if cluster_labels[t_0] == -1:
+                    t_0 += 1
+                    continue
+                if cluster_labels[t]==cluster_labels[t-1] and t < cluster_labels.shape[-1] -1: # If the label is the same as the last time step and we're not at the end yet
+                    continue
+                else:
+                    axs[i].axvspan((t_0)*window_size, (t+1)*window_size, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][int(cluster_labels[t_0])], alpha=0.25)
+                    t_0 = t+1
+
     
         
         
-    axs[-1].set_title('Encoding Trajectory', fontsize=30, fontweight='bold')
-    axs[-1].set_xlabel('Time (Hours)', fontsize=28) 
-    axs[-1].set_xticks(np.arange(num_hours)*length_of_hour)
-    axs[-1].set_xticklabels(np.arange(num_hours))
+    axs[-2].set_title('Encoding Trajectory', fontsize=30, fontweight='bold')
+    axs[-2].set_xlabel('Time (Hours)', fontsize=28) 
+    axs[-2].set_xticks(np.arange(num_hours)*length_of_hour)
+    axs[-2].set_xticklabels(np.arange(num_hours))
 
-    sns.heatmap(encodings.detach().cpu().numpy().T, cbar=False, linewidth=0.5, ax=axs[-1], linewidths=0.05, xticklabels=False)
-    f.tight_layout()
+    sns.heatmap(encodings.T, cbar=False, linewidth=0.5, ax=axs[-2], linewidths=0.05, xticklabels=False)
     
-
+    # Now to plot risk scores
+    axs[-1].set_facecolor('w')
+    axs[-1].plot(np.arange(len(risk_scores)), np.array(risk_scores))
+    axs[-1].set_ylabel('Risk', fontsize=16)
+    axs[-1].set_title(risk_plot_title, fontsize=16)
     # sns.heatmap(encodings.detach().cpu().numpy().T, linewidth=0.5)
+    f.tight_layout()
     plt.savefig(os.path.join(path, hm_file_name))
 
     # windows = np.split(sample[:, :window_size * (T // window_size)], (T // window_size), -1)
@@ -148,26 +137,7 @@ def plot_heatmap(sample, clustering_model, encoder, normalization_specs, path, h
     # encodings = encoder(windows)
 
 
-def plot_pca_trajectory(sample, encoder, window_size, device, sliding_gap, kmeans_model, path, pca_file_name):
-
-    _, num_features, seq_len = sample.shape
-
-    
-    encodings = []
-    with torch.no_grad():
-        encoder.to(device)
-        encoder.eval()
-        for t in range(0, seq_len-window_size+1, sliding_gap):
-            window = sample[:, :, t:t+window_size]
-
-            encodings.append(encoder(torch.unsqueeze(window, 0).to(device)).view(-1,)) # Add a dimension of size 1 at beginning so we have a 'batch' of size 1 for the encoder to work with.
-        
-    encodings = torch.stack(encodings, 0).to('cpu').detach().float()
-    
-
-
-
-
+def plot_pca_trajectory(encodings, path, pca_file_name):
     pca = PCA(n_components=2)
     embedding = pca.fit_transform(encodings.detach().cpu().numpy())
     d = {'f1':embedding[:,0], 'f2':embedding[:,1], 'Time to arrest':np.arange(len(embedding)-1, -1, -1)}#, 'label':windows_label}

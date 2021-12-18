@@ -9,7 +9,7 @@ import seaborn as sns
 sns.set()
 
 
-from tnc.models import GRUDEncoder
+from tnc.models import CausalCNNEncoder
 from sklearn.metrics import roc_auc_score, average_precision_score
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -50,7 +50,9 @@ def main(data_type, n_cv):
     overal_loss, overal_auc, overal_auprc = [], [], []
     for cv in range(n_cv):
         np.random.seed(cv * 9)
-        if data_type == 'mimic':
+        if data_type == 'HiRID':
+            pass
+        '''
             window_size = 4
             train_path = './data/mimic/train'
             test_path = './data/mimic/test'
@@ -77,30 +79,27 @@ def main(data_type, n_cv):
             classifier = LinearClassifier(input_size=32)
             encoder_rnn = RnnPredictor(10, 32)
             encoder = GRUDEncoder(num_features=28, hidden_size=64, num_layers=1, encoding_size=10, extra_layer_types=None, device=device)
+        '''
 
-        if data_type == 'icu':
+        if data_type == 'ICU':
             window_size = 120
-            path = 'DONTCOMMITdata/ICU'  # '/dataset/sickkids/ca_data/processed_data'
-            signal_list = ['Pulse', 'HR', 'SpO2', 'etCO2', 'NBPm', 'NBPd', 'NBPs', 'RR']
+            path = '/dataset/sickkids/TNC_ICU_data'
+            signal_list = ["Pulse", "HR", "SpO2", "etCO2", "NBPm", "NBPd", "NBPs", "RR", "CVPm", "awRR"]
 
-            test_normal_data_maps = torch.Tensor(np.load(os.path.join(path, 'test_normal_data_maps.npy')))
-            test_normal_labels = torch.Tensor(np.load(os.path.join(path, 'test_normal_labels.npy')))
-            train_normal_data_maps = torch.Tensor(np.load(os.path.join(path, 'train_normal_data_maps.npy')))
-            train_normal_labels = torch.Tensor(np.load(os.path.join(path, 'train_normal_labels.npy')))
+            TEST_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'test_mixed_data_maps.npy')))
+            TEST_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'test_mixed_labels.npy')))
 
-            test_ca_data_maps = torch.Tensor(np.load(os.path.join(path, 'test_ca_data_maps.npy')))
-            test_ca_labels = torch.Tensor(np.load(os.path.join(path, 'test_ca_labels.npy')))
-            train_ca_data_maps = torch.Tensor(np.load(os.path.join(path, 'train_ca_data_maps.npy')))
-            train_ca_labels = torch.Tensor(np.load(os.path.join(path, 'train_ca_labels.npy')))
+            train_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_mixed_data_maps.npy')))
+            train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_mixed_labels.npy'))) 
 
-            x_test = torch.vstack([test_normal_data_maps, test_ca_data_maps])[:,:,:,-5*6*12:]
+            x_test = TEST_mixed_data_maps
             y_test = torch.vstack([test_normal_labels, test_ca_labels])[:, -1]
             x_train = torch.vstack([train_normal_data_maps, train_ca_data_maps])[:,:,:,-5*6*12:]
             y_train = torch.vstack([train_normal_labels, train_ca_labels])[:, -1]
             # Create model
             classifier = LinearClassifier(input_size=32)
-            encoder_rnn = RnnPredictor(16, 32)
-            encoder = GRUDEncoder(num_features=8, hidden_size=64, num_layers=1, encoding_size=16, extra_layer_types=None, device=device)
+            rnn = RnnPredictor(16, 32)
+            encoder = CausalCNNEncoder(in_channels=20, channels=8, depth=2, reduced_size=60, encoding_size=16, kernel_size=3, device=device, window_size=window_size)
 
         inds = list(range(len(x_train)))
         random.shuffle(inds)
