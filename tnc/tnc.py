@@ -938,23 +938,23 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                 # shuffle for this cv:
                 inds = np.arange(len(train_mixed_data_maps))
                 np.random.shuffle(inds)
-                train_mixed_data_maps = train_mixed_data_maps[inds]
-                train_mixed_labels = train_mixed_labels[inds]
-                print("Size of train + valid data: ", train_mixed_data_maps.shape)
-                print("Size of train + valid labels: ", train_mixed_labels.shape)
+                train_mixed_data_maps_cv = train_mixed_data_maps[inds]
+                train_mixed_labels_cv = train_mixed_labels[inds]
+                print("Size of train + valid data: ", train_mixed_data_maps_cv.shape)
+                print("Size of train + valid labels: ", train_mixed_labels_cv.shape)
 
 
-                validation_mixed_data_maps = train_mixed_data_maps[0:int(0.2*len(train_mixed_data_maps))]
-                validation_mixed_labels = train_mixed_labels[0:int(0.2*len(train_mixed_data_maps))]
-                print("Size of valid data: ", validation_mixed_data_maps.shape)
-                print("Size of valid labels: ", validation_mixed_labels.shape)
-                print("num positive valid samples: ", sum([1 in validation_mixed_labels[ind] for ind in range(len(validation_mixed_labels))]))
+                validation_mixed_data_maps_cv = train_mixed_data_maps_cv[0:int(0.2*len(train_mixed_data_maps_cv))]
+                validation_mixed_labels_cv = train_mixed_labels[0:int(0.2*len(train_mixed_data_maps_cv))]
+                print("Size of valid data: ", validation_mixed_data_maps_cv.shape)
+                print("Size of valid labels: ", validation_mixed_labels_cv.shape)
+                print("num positive valid samples: ", sum([1 in validation_mixed_labels_cv[ind] for ind in range(len(validation_mixed_labels_cv))]))
 
-                train_mixed_data_maps = train_mixed_data_maps[int(0.2*len(train_mixed_data_maps)):]
-                train_mixed_labels = train_mixed_labels[int(0.2*len(train_mixed_labels)):]
-                print("Size of train data: ", train_mixed_data_maps.shape)
-                print("Size of train labels: ", train_mixed_labels.shape)
-                print("num positive train samples: ", sum([1 in train_mixed_labels[ind] for ind in range(len(train_mixed_labels))]))
+                train_mixed_data_maps_cv = train_mixed_data_maps_cv[int(0.2*len(train_mixed_data_maps_cv)):]
+                train_mixed_labels_cv = train_mixed_labels_cv[int(0.2*len(train_mixed_labels_cv)):]
+                print("Size of train data: ", train_mixed_data_maps_cv.shape)
+                print("Size of train labels: ", train_mixed_labels_cv.shape)
+                print("num positive train samples: ", sum([1 in train_mixed_labels_cv[ind] for ind in range(len(train_mixed_labels_cv))]))
 
 
                 if os.path.exists('../ckpt/%s/%s_encoder_checkpoint_%d_Classifier_checkpoint_%d.tar'%(data_type, UNIQUE_ID, encoder_cv, classification_cv)):
@@ -968,13 +968,13 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                     print("Checkpoint loaded for classifier! Encoder cv %d, classifier cv %d"%(encoder_cv, classification_cv))
                 else:
                     print("TRAINING LINEAR CLASSIFIER")
-                    classifier_train_labels = torch.Tensor([1 in label for label in train_mixed_labels]) # Sets labels for positive samples to 1
-                    classifier_validation_labels = torch.Tensor([1 in label for label in validation_mixed_labels]) # Sets labels for positive samples to 1
+                    classifier_train_labels = torch.Tensor([1 in label for label in train_mixed_labels_cv]) # Sets labels for positive samples to 1
+                    classifier_validation_labels = torch.Tensor([1 in label for label in validation_mixed_labels_cv]) # Sets labels for positive samples to 1
                     classifier_TEST_labels = torch.Tensor([1 in label for label in TEST_mixed_labels]) # Sets labels for positive samples to 1
                     
 
-                    rnn, classifier, valid_auroc, valid_auprc, TEST_auroc, TEST_auprc = train_linear_classifier(X_train=train_mixed_data_maps, y_train=classifier_train_labels, 
-                    X_validation=validation_mixed_data_maps, y_validation=classifier_validation_labels, 
+                    rnn, classifier, valid_auroc, valid_auprc, TEST_auroc, TEST_auprc = train_linear_classifier(X_train=train_mixed_data_maps_cv, y_train=classifier_train_labels, 
+                    X_validation=validation_mixed_data_maps_cv, y_validation=classifier_validation_labels, 
                     X_TEST=TEST_mixed_data_maps, y_TEST=classifier_TEST_labels,
                     encoding_size=encoder.encoding_size, batch_size=128, num_pre_positive_encodings=num_pre_positive_encodings, encoder=encoder, return_models=True, return_scores=True, pos_sample_name=pos_sample_name, 
                     data_type=data_type, classification_cv=classification_cv, encoder_cv=encoder_cv)
@@ -1008,6 +1008,7 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
         train_pos_sample_inds = [ind for ind in range(len(train_mixed_labels)) if 1 in train_mixed_labels[ind]]
         train_neg_sample_inds = [ind for ind in range(len(train_mixed_labels)) if 1 not in train_mixed_labels[ind]]
         indexes_chosen_to_plot = train_pos_sample_inds[0:25]
+
         print("Starting to plot embeddings..")
         num_positive_plotted = len(indexes_chosen_to_plot)
         print('Number of positive samples to be plotted: ', num_positive_plotted)
@@ -1082,8 +1083,8 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
         masked_pos_inds = torch.arange(len(masked_pos_clustering_encodings))
         masked_neg_inds = torch.arange(len(masked_pos_clustering_encodings), len(masked_clustering_encodings))
 
-        clustering_model = AgglomerativeClustering(n_clusters=8, linkage='complete', affinity='cosine', compute_distances=True).fit(masked_clustering_encodings)
-        positive_clustering_model = AgglomerativeClustering(n_clusters=8, linkage='complete', affinity='cosine', compute_distances=True).fit(masked_clustering_encodings[masked_pos_inds])
+        clustering_model = AgglomerativeClustering(n_clusters=8, linkage='ward', affinity='euclidean', compute_distances=True).fit(masked_clustering_encodings)
+        positive_clustering_model = AgglomerativeClustering(n_clusters=8, linkage='ward', affinity='euclidean', compute_distances=True).fit(masked_clustering_encodings[masked_pos_inds])
 
         #clustering_model = KMeans(n_clusters=8).fit(masked_clustering_encodings)
         #positive_clustering_model = KMeans(n_clusters=8).fit(masked_clustering_encodings[masked_pos_inds])

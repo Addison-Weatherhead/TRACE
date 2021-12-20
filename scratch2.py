@@ -6,7 +6,7 @@ import argparse
 import math
 import seaborn as sns; sns.set()
 import random
-
+from sklearn.cluster import AgglomerativeClustering
 random.seed(0)
 
 
@@ -33,6 +33,16 @@ clustering_encodings = torch.Tensor([[[ -1,  -7],
          [  7,   2],
          [-10,  -6],
          [ -7,   4]]])
+
+clustering_encodings = clustering_encodings.reshape(5, -1)
+print(clustering_encodings.shape)
+
+clustering_model = AgglomerativeClustering(n_clusters=3, linkage='complete', affinity='cosine', compute_distances=True).fit(clustering_encodings)
+
+print(clustering_model.labels_)
+
+
+'''
 encoding_mask = torch.ones(4, 5)
 encoding_mask[0, 0:2] = -1
 encoding_mask[1, 0:3] = -1
@@ -115,3 +125,4 @@ print(masked_clustering_encodings[masked_pos_inds])
 print(masked_clustering_encodings[masked_neg_inds])
 
 
+'''

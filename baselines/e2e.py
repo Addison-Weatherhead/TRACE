@@ -9,42 +9,10 @@ import seaborn as sns
 sns.set()
 
 
-from tnc.models import CausalCNNEncoder
+from tnc.models import CausalCNNEncoder, LinearClassifier, RnnPredictor
 from sklearn.metrics import roc_auc_score, average_precision_score
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-class LinearClassifier(torch.nn.Module):
-    def __init__(self, input_size):
-        super(LinearClassifier, self).__init__()
-        self.input_size = input_size
-
-        self.classifier =torch.nn.Sequential(torch.nn.Linear(self.input_size, 8),
-                                        torch.nn.ReLU(),
-                                        torch.nn.Dropout(p=0.3),
-                                        torch.nn.Linear(8, 1),
-                                        torch.nn.Dropout(p=0.3))
-        torch.nn.init.xavier_uniform_(self.classifier[0].weight)
-        torch.nn.init.xavier_uniform_(self.classifier[3].weight)
-
-    def forward(self, x):
-        logits = self.classifier(x)
-        return logits
-
-
-class RnnPredictor(torch.nn.Module):
-    def __init__(self, encoding_size, hidden_size):
-        super(RnnPredictor, self).__init__()
-        self.rnn = torch.nn.LSTM(input_size=encoding_size,  hidden_size=hidden_size, num_layers=1, batch_first=True)
-
-    def forward(self, x, past=None):
-        x = x.permute(0,2,1)        # Feature should be the last dimension
-        if past is None:
-            output, (h_n, c_n) = self.rnn(x)
-        else:
-            output, (h_n, c_n) = self.rnn(x, past)
-        return output, h_n
-
 
 def main(data_type, n_cv):
     overal_loss, overal_auc, overal_auprc = [], [], []
@@ -93,9 +61,9 @@ def main(data_type, n_cv):
             train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_mixed_labels.npy'))) 
 
             x_test = TEST_mixed_data_maps
-            y_test = torch.vstack([test_normal_labels, test_ca_labels])[:, -1]
-            x_train = torch.vstack([train_normal_data_maps, train_ca_data_maps])[:,:,:,-5*6*12:]
-            y_train = torch.vstack([train_normal_labels, train_ca_labels])[:, -1]
+            y_test = TEST_mixed_labels[:, -1] # Just grab last label, that's all we need for classifier
+            x_train = train_mixed_data_maps
+            y_train = train_mixed_labels[:, -1]
             # Create model
             classifier = LinearClassifier(input_size=32)
             rnn = RnnPredictor(16, 32)
@@ -115,16 +83,16 @@ def main(data_type, n_cv):
         test_loader = torch.utils.data.DataLoader(testset, batch_size=20, shuffle=True)
 
 
-        params = list(classifier.parameters()) + list(encoder.parameters()) + list(encoder_rnn.parameters())
+        params = list(classifier.parameters()) + list(encoder.parameters()) + list(rnn.parameters())
         optimizer = torch.optim.Adam(params, lr=0.0001)
         train_loss_trend, valid_loss_trend = [], []
-        for epoch in range(51):
-            train_loss, train_auc, train_auprc = epoch_run(train_loader, classifier, encoder, encoder_rnn, window_size=window_size, optimizer=optimizer, train=True)
-            valid_loss, valid_auc, valid_auprc = epoch_run(valid_loader, classifier, encoder, encoder_rnn, window_size=window_size, optimizer=optimizer, train=False)
+        for epoch in range(1, 101):
+            train_loss, train_auc, train_auprc = epoch_run(train_loader, classifier, encoder, rnn, window_size=window_size, optimizer=optimizer, train=True)
+            valid_loss, valid_auc, valid_auprc = epoch_run(valid_loader, classifier, encoder, rnn, window_size=window_size, optimizer=optimizer, train=False)
             train_loss_trend.append(train_loss)
             valid_loss_trend.append(valid_loss)
 
-            if epoch%1==0:
+            if epoch%10==0:
                 print('***** Epoch %d *****' % epoch)
                 print('Training Loss: %.3f \t Training AUROC: %.3f  \t Training AUROC: %.3f'
                     '\t Valid Loss: %.3f \t Valid AUROC: %.3f \t Valid AUROC: %.3f' % (train_loss, train_auc, train_auprc, valid_loss, valid_auc, valid_auprc))
@@ -132,7 +100,7 @@ def main(data_type, n_cv):
                     'epoch': epoch,
                     'encoder_state_dict': encoder.state_dict(),
                     'classifier_state_dict': classifier.state_dict(),
-                    'encoder_rnn_state_dict':encoder_rnn.state_dict(), 
+                    'encoder_rnn_state_dict':rnn.state_dict(), 
                     'loss': valid_loss,
                     'auc': valid_auc
                 }
