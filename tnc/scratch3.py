@@ -1,36 +1,24 @@
-from os import pread
-import torch
+
+import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
-from tnc.models import CausalCNNEncoder
-import hdbscan
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-from sklearn.datasets import make_blobs
-print(device)
-encoder = CausalCNNEncoder(in_channels=20,
-                           channels=8,
-                           depth=2,
-                           reduced_size=60,
-                           out_channels=16,
-                           kernel_size=4,
-                           device=device)
 
-clustering_model = hdbscan.HDBSCAN(min_cluster_size=5, gen_min_span_tree=True, core_dist_n_jobs=4)
-data = torch.randn(50, 2, 10, 120)
-
-encodings = encoder(data).detach().cpu().numpy()
-
-clustering_model.fit(encodings)
-predictions = clustering_model.labels_
-print(predictions.shape)
-print(predictions.min())
-print(predictions.max())
-print(type(predictions))
-
-print('===')
-TEST_mixed_labels = torch.from_numpy(np.load('/datasets/sickkids/TNC_ICU_data/test_mixed_labels.npy'))
+f, ax = plt.subplots(1)  #
+f.set_figheight(7)
+f.set_figwidth(23)
+#ax.set_facecolor('w')
 
 
-thing = torch.Tensor([1, 2, 4]).reshape(-1, 1)
-print(thing.repeat(1, 5))
-print('yo')
-print(clustering_model.n_clusters)
+sns.lineplot(np.arange(450), np.zeros(450), ax=ax)
+
+ax.axvspan(0, 50, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][0], alpha=0.35)
+ax.axvspan(50, 100, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][1], alpha=0.35)
+ax.axvspan(100, 150, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][2], alpha=0.35)
+ax.axvspan(150, 200, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][3], alpha=0.35)
+ax.axvspan(200, 250, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][4], alpha=0.35)
+ax.axvspan(250, 300, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][5], alpha=0.35)
+ax.axvspan(350, 400, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][6], alpha=0.35)
+ax.axvspan(400, 450, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][7], alpha=0.35)
+
+
+plt.savefig('test.pdf')

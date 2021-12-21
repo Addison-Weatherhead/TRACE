@@ -81,6 +81,7 @@ def plot_heatmap(sample, encodings, cluster_labels, risk_scores, normalization_s
 
     for i in range(len(signal_list)):
         axs[i].set_title(signal_list[i], fontsize=30, fontweight='bold')
+        axs[i].set_facecolor('w')
 
     
     num_hours = int(seq_len/length_of_hour)
@@ -107,7 +108,7 @@ def plot_heatmap(sample, encodings, cluster_labels, risk_scores, normalization_s
                 if cluster_labels[t]==cluster_labels[t-1] and t < cluster_labels.shape[-1] -1: # If the label is the same as the last time step and we're not at the end yet
                     continue
                 else:
-                    axs[i].axvspan((t_0)*window_size, (t+1)*window_size, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][int(cluster_labels[t_0])], alpha=0.25)
+                    axs[i].axvspan((t_0)*window_size, (t+1)*window_size, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][int(cluster_labels[t_0])], alpha=0.35)
                     t_0 = t+1
 
     

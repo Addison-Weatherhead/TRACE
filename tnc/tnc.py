@@ -400,7 +400,7 @@ def linear_classifier_epoch_run(data, labels, train, num_pre_positive_encodings,
         print("SHUFFLING DATA BEFORE FEEDING INTO RNN!")
         # Shuffling before feeding to RNN
         inds = np.arange(len(window_samples))
-        np.random.shuffle(inds)
+        random.shuffle(inds)
         window_samples = window_samples[inds]
         window_labels = window_labels[inds]
         window_masks = window_masks[inds]
@@ -708,7 +708,7 @@ def learn_encoder(data_maps, labels, encoder_type, encoder_hyper_params, pretrai
                 performance = checkpoint['performance']
         
         inds = np.arange(len(data_maps))
-        np.random.shuffle(inds)
+        random.shuffle(inds)
         data_maps = data_maps[inds]
         labels = labels[inds]
 
@@ -937,7 +937,7 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                 
                 # shuffle for this cv:
                 inds = np.arange(len(train_mixed_data_maps))
-                np.random.shuffle(inds)
+                random.shuffle(inds)
                 train_mixed_data_maps_cv = train_mixed_data_maps[inds]
                 train_mixed_labels_cv = train_mixed_labels[inds]
                 print("Size of train + valid data: ", train_mixed_data_maps_cv.shape)
@@ -1135,8 +1135,6 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
         
         print('indexes_chosen_to_plot :', indexes_chosen_to_plot)
         negative_masks = []
-        np.set_printoptions(threshold=sys.maxsize)
-        print('First 220 values of clustering model positive labels: ', positive_clustering_model.labels_[0:220])
         
         for plot_index, ind in enumerate(indexes_chosen_to_plot):
             if plot_index < num_positive_plotted:
