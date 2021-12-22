@@ -1023,10 +1023,10 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
         
         indexes_for_clustering = indexes_chosen_to_plot.copy()
         # Now we'll add the remaining positive samples from the train set
-        indexes_for_clustering.extend(train_pos_sample_inds[num_positive_plotted:])
+        indexes_for_clustering.extend(train_pos_sample_inds[num_positive_plotted:min(num_positive_plotted+200, len(train_pos_sample_inds))])
         # Now we'll add the number of negative samples necessary to maintain a 20 times imbalance in encodings that get plotted
                                         # for the positive indices we haven't set aside to plot, compute 20 times the number of encodings we'll get from them
-        num_negatives_to_add = int((20*(pre_positive_window/window_size)*(len(train_pos_sample_inds) - num_positive_plotted))/ \
+        num_negatives_to_add = int((20*(pre_positive_window/window_size)*(min(num_positive_plotted+200, len(train_pos_sample_inds)) - num_positive_plotted))/ \
                                     (train_mixed_data_maps.shape[-1]/window_size)) # then divide by seq_len/window_size, i.e. the number of encodings we get from each negative sample.
         
         indexes_for_clustering.extend(train_neg_sample_inds[num_negative_plotted: num_negative_plotted + num_negatives_to_add])
