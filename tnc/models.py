@@ -1307,11 +1307,23 @@ class RnnPredictor(torch.nn.Module):
         self.num_layers = 1
         self.rnn = torch.nn.LSTM(input_size=encoding_size,  hidden_size=hidden_size, num_layers=self.num_layers, batch_first=True)
 
-    def forward(self, x):
-        # x is of shape (num_samples, seq_len, num_features)
-        
-        output, (h_n, _) = self.rnn(x)
-        return output, h_n
+    def forward(self, x, variable_len=False, x_lengths=None):
+        if variable_len:
+            # x is of shape (num_samples, padded_seq_len, num_features)
+            # Now to pack the data:
+
+            x = torch.nn.utils.rnn.pack_padded_sequence(x, x_lengths, batch_first=True)
+            output, (h_n, _) = self.rnn(x)
+            
+            # Now to unpack again
+            output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first=True)
+
+            # Then how do i modify the loss like the article did..?
+            return output, h_n
+
+        else:
+            output, (h_n, _) = self.rnn(x)
+            return output, h_n
 
 
 
@@ -1614,9 +1626,9 @@ class CausalCNNEncoder(torch.nn.Module):
             x = torch.index_select(input=x, dim=3, index=inds)
 
         if return_encoding_mask:
-            encoding_mask  = torch.sum(x[:, 1, :, :]==-1, dim=1) # Of shape (num_samples, seq_len). the ij'th element is >0 if that time step was fully imputed, 0 otherwise
+            encoding_mask  = torch.sum(x[:, 1, :, :]==0, dim=1) # Of shape (num_samples, seq_len). the ij'th element is = num_features if that time step was fully imputed, 0 otherwise
             encoding_mask = encoding_mask[:, self.window_size-1::self.window_size] # Of shape (num_samples, seq_len/self.window_size). On the second dim, only keeps every self.window_size'th element
-            encoding_mask[encoding_mask > 0] = -1 # Now the ij'th element is -1 if the j'th encoding from sample i was derived from fully imputed data. 0 otherwise
+            encoding_mask[encoding_mask == x.shape[2]] = -1 # Now the ij'th element is -1 if the j'th encoding from sample i was derived from fully imputed data. 0 otherwise
         
         
         num_samples, two, num_features, seq_len = x.shape

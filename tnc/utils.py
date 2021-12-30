@@ -56,7 +56,6 @@ def plot_heatmap(sample, encodings, cluster_labels, risk_scores, normalization_s
     sample[0][sample[1]==1] = (sample[0] * stds)[sample[1]==1] # At the places in the data where the map is 1, multiply that data by std
     sample[0][sample[1]==1] = (sample[0] + means)[sample[1]==1] # Then add mean
 
-
     if 'waveform' in path:
         f, axs = plt.subplots(3)
         f.set_figheight(12)
