@@ -1,4 +1,5 @@
-# Unsupervised Representation Learning for TimeSeries with Temporal Neighborhood Coding (TNC)
+# Learning Unsupervised Representations for ICU Timeseries
+with TempoRal AutoCorrelation Encoding (TRACE)
 
 ![Screenshot](tnc.png)
 
