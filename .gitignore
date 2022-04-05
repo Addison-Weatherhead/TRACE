@@ -31,3 +31,4 @@ circulatory_failure_plots/
 *.txt
 *.sh
 tnc/scratch3.py
+evaluations/
