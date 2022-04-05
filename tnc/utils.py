@@ -15,6 +15,7 @@ from sklearn.decomposition import PCA
 from sklearn.neighbors import KNeighborsClassifier
 import hdbscan
 from scipy.cluster.hierarchy import dendrogram
+import umap
 
 def create_simulated_dataset(window_size=50, path='./data/simulated_data/', batch_size=100):
     if not os.listdir(path):
@@ -47,14 +48,171 @@ def create_simulated_dataset(window_size=50, path='./data/simulated_data/', batc
     return train_loader, valid_loader, test_loader
 
 
+def plot_heatmap_subset_signals(sample, sample_mask, encodings, cluster_labels, risk_scores, path, hm_file_name, risk_plot_title, signal_list, length_of_hour, window_size, plot_clusters):
+    # Since encodings have now been generated, we can un normalize our data for plotting
+    _, num_features, seq_len = sample.shape
+    #means, stds = normalization_specs[0], normalization_specs[1]
+    #means = means.reshape(-1, 1)
+    #stds = stds.reshape(-1, 1)
+    #sample[0][sample[1]==1] = (sample[0] * stds)[sample[1]==1] # At the places in the data where the map is 1, multiply that data by std
+    #sample[0][sample[1]==1] = (sample[0] + means)[sample[1]==1] # Then add mean
+
+    
+    f, axs = plt.subplots(2)  #
+    f.set_figheight(6)
+    f.set_figwidth(16)
+    for feat in range(num_features):
+        if sample_mask[feat] == 1:
+            sns.lineplot(np.arange(seq_len), sample[0][feat], ax=axs[0], label=signal_list[feat])
+
+        #axs[i].set_title(signal_list[i], fontsize=30, fontweight='bold')
+    
+    #plt.setp(axs[0].get_legend().get_texts(), fontsize='22')
+    #axs[0].legend(bbox_to_anchor=(0, 1.02, 0, 0.2), loc="lower left", mode="expand", ncol=4)
+    axs[0].legend(loc='upper center', bbox_to_anchor=(0.5, 1.05), prop={"size":22}, ncol=4)
+    num_hours = int(seq_len/length_of_hour)
+    axs[0].set_facecolor('w')
+    axs[0].set_title('Physiological Signals', fontsize=22)
+        
+    axs[0].set_xticks(np.arange(num_hours)*length_of_hour)
+    axs[0].set_xticklabels(np.arange(num_hours))
+    axs[0].vlines(seq_len//2, ymin=axs[0].get_ylim()[0], ymax=axs[0].get_ylim()[1], colors='black', linestyles='dashed')
+    axs[0].set_xlabel('Time (hrs)', fontsize=16) 
+    axs[0].xaxis.set_tick_params(labelsize=20)
+    #axs[0].yaxis.set_tick_params(labelsize=22)
+    
+    axs[0].margins(x=0)
+    axs[0].grid(False)
+
+    
+    
+    
+    if plot_clusters:
+        t_0 = 0
+        for t in range(1, cluster_labels.shape[-1]):
+            if cluster_labels[t_0] == -1:
+                t_0 += 1
+                continue
+            if cluster_labels[t]==cluster_labels[t-1] and t < cluster_labels.shape[-1] -1: # If the label is the same as the last time step and we're not at the end yet
+                continue
+            else:
+                axs[0].axvspan((t_0)*window_size, (t+1)*window_size, facecolor=['g', 'r', 'b', 'y', 'm', 'c', 'k', 'w'][int(cluster_labels[t_0])], alpha=0.35)
+                t_0 = t+1
+
+    
+        
+        
+    axs[-1].set_title('Representations', fontsize=22)
+    axs[-1].set_xticks(np.arange(num_hours)*length_of_hour)
+    axs[-1].set_xticklabels(np.arange(num_hours))
+    plt.xlabel('Time (hrs)', fontsize=16) 
+    
+    axs[-1].xaxis.set_tick_params(labelsize=18)
+    
+
+    sns.heatmap(encodings.T, cbar=False, linewidth=0.5, ax=axs[-1], linewidths=0.05, xticklabels=False)
+    
+    # Now to plot risk scores
+    #axs[-1].set_facecolor('w')
+    #axs[-1].plot(np.arange(len(risk_scores)), np.array(risk_scores))
+    #axs[-1].set_ylabel('Risk', fontsize=16)
+    #axs[-1].set_title(risk_plot_title, fontsize=16)
+    # sns.heatmap(encodings.detach().cpu().numpy().T, linewidth=0.5)
+    plt.tight_layout()
+    plt.savefig(os.path.join(path, hm_file_name))
+
+    # windows = np.split(sample[:, :window_size * (T // window_size)], (T // window_size), -1)
+    # windows = torch.Tensor(np.stack(windows, 0)).to(encoder.device)
+    # windows_label = np.split(label[:window_size * (T // window_size)], (T // window_size), -1)
+    # windows_label = torch.Tensor(np.mean(np.stack(windows_label, 0), -1 ) ).to(encoder.device)
+    # encoder.to(encoder.device)
+    # encodings = encoder(windows)
+
+
+def plot_heatmap_subset_signals_with_risk(sample, sample_mask, encodings, risk_scores, path, 
+hm_file_name, risk_plot_title, signal_list, length_of_hour, risk_x_axis_label, truncate_amt):
+    # Since encodings have now been generated, we can un normalize our data for plotting
+    _, num_features, seq_len = sample.shape
+    #means, stds = normalization_specs[0], normalization_specs[1]
+    #means = means.reshape(-1, 1)
+    #stds = stds.reshape(-1, 1)
+    #sample[0][sample[1]==1] = (sample[0] * stds)[sample[1]==1] # At the places in the data where the map is 1, multiply that data by std
+    #sample[0][sample[1]==1] = (sample[0] + means)[sample[1]==1] # Then add mean
+
+    num_hours = int(seq_len/length_of_hour)
+    rng = np.arange(num_hours)
+    xtick_labels = [(seq_len-truncate_amt)//length_of_hour, int((2/3)*(seq_len-truncate_amt)//length_of_hour), int((1/3)*(seq_len-truncate_amt)//length_of_hour), truncate_amt//length_of_hour]
+    f, axs = plt.subplots(3)  #
+    f.set_figheight(9)
+    f.set_figwidth(16)
+    for feat in range(num_features):
+        if sample_mask[feat] == 1:
+            sns.lineplot(np.arange(seq_len), sample[0][feat], ax=axs[0], label=signal_list[feat])
+
+
+        #axs[i].set_title(signal_list[i], fontsize=30, fontweight='bold')
+    axs[0].xaxis.set_ticks([])
+    axs[0].xaxis.set_ticklabels([])
+    #plt.setp(axs[0].get_legend().get_texts(), fontsize='22')
+    #axs[0].legend(bbox_to_anchor=(0, 1.02, 0, 0.2), loc="lower left", mode="expand", ncol=4)
+    axs[0].legend(loc='upper center', bbox_to_anchor=(0.5, 1.05), prop={"size":22}, ncol=4)
+    
+    axs[0].set_facecolor('w')
+    axs[0].set_title('Physiological Signals', fontsize=25)
+        
+    #axs[0].set_xticks(np.arange(num_hours)*length_of_hour)
+    #axs[0].set_xticklabels(np.arange(num_hours))
+    #axs[0].vlines(seq_len//2, ymin=axs[0].get_ylim()[0], ymax=axs[0].get_ylim()[1], colors='black', linestyles='dashed')
+
+    #axs[0].xaxis.set_tick_params(labelsize=20)
+    #axs[0].yaxis.set_tick_params(labelsize=22)
+    
+    axs[0].margins(x=0)
+    axs[0].grid(False)
+
+
+    
+        
+        
+    axs[1].set_title('Representations', fontsize=25)
+    #axs[1].set_xlabel('Time', fontsize=24) 
+    #axs[1].set_xticks(np.arange(num_hours)*length_of_hour)
+    #axs[1].set_xticklabels(np.arange(num_hours))
+
+    sns.heatmap(encodings.T, cbar=False, linewidth=0.5, ax=axs[1], linewidths=0.05, xticklabels=False)
+    
+    # Now to plot risk scores
+    #axs[-1].set_facecolor('w')
+    #axs[-1].plot(np.arange(len(risk_scores)), np.array(risk_scores))
+    #axs[-1].set_ylabel('Risk', fontsize=16)
+    #axs[-1].set_title(risk_plot_title, fontsize=16)
+    # sns.heatmap(encodings.detach().cpu().numpy().T, linewidth=0.5)
+
+    axs[2].set_title(risk_plot_title, fontsize=25)
+    axs[2].plot(risk_scores)
+    axs[2].set_xlabel(risk_x_axis_label, fontsize=18)
+
+    axs[2].set_xticks([0, len(risk_scores)//3, 2*len(risk_scores)//3, len(risk_scores)])
+    axs[2].set_xticklabels(xtick_labels)
+    print('xticks:')
+    print([0, len(risk_scores)//3, 2*len(risk_scores)//3, len(risk_scores)])
+    print('xtick_labels:')
+    print(xtick_labels)
+
+    f.tight_layout()
+    plt.savefig(os.path.join(path, hm_file_name))
+
+
+
 def plot_heatmap(sample, encodings, cluster_labels, risk_scores, normalization_specs, path, hm_file_name, risk_plot_title, signal_list, length_of_hour, window_size):
     # Since encodings have now been generated, we can un normalize our data for plotting
+    sample_clone = np.copy(sample)
     _, num_features, seq_len = sample.shape
     means, stds = normalization_specs[0], normalization_specs[1]
     means = means.reshape(-1, 1)
     stds = stds.reshape(-1, 1)
-    sample[0][sample[1]==1] = (sample[0] * stds)[sample[1]==1] # At the places in the data where the map is 1, multiply that data by std
-    sample[0][sample[1]==1] = (sample[0] + means)[sample[1]==1] # Then add mean
+    sample_clone[0][sample_clone[1]==1] = (sample_clone[0] * stds)[sample_clone[1]==1] # At the places in the data where the map is 1, multiply that data by std
+    sample_clone[0][sample_clone[1]==1] = (sample_clone[0] + means)[sample_clone[1]==1] # Then add mean
 
     if 'waveform' in path:
         f, axs = plt.subplots(3)
@@ -64,8 +222,8 @@ def plot_heatmap(sample, encodings, cluster_labels, risk_scores, normalization_s
         axs[0] = plt.subplot(gs[0])
         axs[1] = plt.subplot(gs[1])
         axs[2] = plt.subplot(gs[2])
-        sns.lineplot(np.arange(0,sample.shape[1]/250, 1./250), sample[0], ax=axs[0])
-        sns.lineplot(np.arange(0,sample.shape[1]/250, 1./250), sample[1], ax=axs[1])
+        sns.lineplot(np.arange(0,sample_clone.shape[1]/250, 1./250), sample_clone[0], ax=axs[0])
+        sns.lineplot(np.arange(0,sample_clone.shape[1]/250, 1./250), sample_clone[1], ax=axs[1])
         axs[1].margins(x=0)
         axs[1].grid(False)
         axs[1].xaxis.set_tick_params(labelsize=22)
@@ -76,7 +234,7 @@ def plot_heatmap(sample, encodings, cluster_labels, risk_scores, normalization_s
         f.set_figheight(num_features*7)
         f.set_figwidth(23)
         for feat in range(num_features):
-            sns.lineplot(np.arange(seq_len), sample[0][feat], ax=axs[feat])
+            sns.lineplot(np.arange(seq_len), sample_clone[0][feat], ax=axs[feat])
 
     for i in range(len(signal_list)):
         axs[i].set_title(signal_list[i], fontsize=30, fontweight='bold')
@@ -84,7 +242,7 @@ def plot_heatmap(sample, encodings, cluster_labels, risk_scores, normalization_s
 
     
     num_hours = int(seq_len/length_of_hour)
-    for i in range(sample.shape[-2] + 2):
+    for i in range(sample_clone.shape[-2] + 2):
         axs[i].set_xlabel('Time (Hours)', fontsize=28)
         
         axs[i].set_xticks(np.arange(num_hours)*length_of_hour)
@@ -137,16 +295,67 @@ def plot_heatmap(sample, encodings, cluster_labels, risk_scores, normalization_s
     # encodings = encoder(windows)
 
 
-def plot_pca_trajectory(encodings, path, pca_file_name):
+def plot_pca_trajectory(encodings, path, pca_file_name, pos_sample_name='arrest'):
+    sns.set()
     pca = PCA(n_components=2)
     embedding = pca.fit_transform(encodings.detach().cpu().numpy())
-    d = {'f1':embedding[:,0], 'f2':embedding[:,1], 'Time to arrest':np.arange(len(embedding)-1, -1, -1)}#, 'label':windows_label}
+    d = {'f1':embedding[:,0], 'f2':embedding[:,1], 'Time to %s'%pos_sample_name:np.arange(len(embedding)-1, -1, -1)}#, 'label':windows_label}
     df = pd.DataFrame(data=d)
 
     fig, ax = plt.subplots()
     ax.set_title("Trajectory")
     # sns.jointplot(x="f1", y="f2", data=df, kind="kde", size='time', hue='label')
-    sns.scatterplot(x="f1", y="f2", data=df, hue='Time to arrest')
+    sns.scatterplot(x="f1", y="f2", data=df, hue='Time to %s'%pos_sample_name)
+    plt.savefig(os.path.join(path, pca_file_name))
+
+
+def plot_pca_trajectory_binned(encodings, path, pca_file_name, event_name):
+    data = np.copy(encodings.detach().cpu().numpy())
+    n_samples, seq_len, encoding_size = data.shape
+
+    inds = np.vstack([np.arange(seq_len-1, -1, -1) for i in range(n_samples)])
+    inds[np.where(inds < seq_len/4)] = 0
+    inds[np.where((inds < 2*seq_len/4) & (inds >= seq_len/4))] = 1
+    inds[np.where((inds < 3*seq_len/4) & (inds >= 2*seq_len/4))] = 2
+    inds[np.where(inds >= 3*seq_len/4)] = 3
+
+    data = data.reshape(n_samples*seq_len, encoding_size)
+
+    pca = PCA(n_components=2)
+    embeddings = pca.fit_transform(data)
+
+    inds = inds.reshape(-1,)
+    d = {'f1':embeddings[:,0], 'f2':embeddings[:,1], 'Time to %s'%event_name:inds}#, 'label':windows_label}
+    df = pd.DataFrame(data=d)
+
+    fig, ax = plt.subplots()
+    ax.set_title("Trajectory")
+    # sns.jointplot(x="f1", y="f2", data=df, kind="kde", size='time', hue='label')
+    sns.scatterplot(x="f1", y="f2", data=df, hue='Time to %s'%event_name)
+    plt.savefig(os.path.join(path, pca_file_name))
+
+def plot_tsne_trajectory_binned(encodings, path, pca_file_name, event_name):
+    data = np.copy(encodings.detach().cpu().numpy())
+    n_samples, seq_len, encoding_size = data.shape
+
+    inds = np.vstack([np.arange(seq_len-1, -1, -1) for i in range(n_samples)])
+    inds[np.where(inds < seq_len/4)] = 0
+    inds[np.where((inds < 2*seq_len/4) & (inds >= seq_len/4))] = 1
+    inds[np.where((inds < 3*seq_len/4) & (inds >= 2*seq_len/4))] = 2
+    inds[np.where(inds >= 3*seq_len/4)] = 3
+
+    data = data.reshape(n_samples*seq_len, encoding_size)
+
+    tsne = TSNE(n_components=2)
+    embeddings = tsne.fit_transform(data)
+    inds = inds.reshape(-1,)
+    d = {'f1':embeddings[:,0], 'f2':embeddings[:,1], 'Time to %s'%event_name:inds}#, 'label':windows_label}
+    df = pd.DataFrame(data=d)
+
+    fig, ax = plt.subplots()
+    ax.set_title("Trajectory")
+    # sns.jointplot(x="f1", y="f2", data=df, kind="kde", size='time', hue='label')
+    sns.scatterplot(x="f1", y="f2", data=df, hue='Time to %s'%event_name)
     plt.savefig(os.path.join(path, pca_file_name))
 
 def plot_distribution(x_test, y_test, encoder, window_size, path, device, title="", augment=4, cv=0):
@@ -332,6 +541,42 @@ def dim_reduction_positive_clusters(positive_encodings, positive_cluster_labels,
     plt.savefig('../DONTCOMMITplots/%s/%s/%s_positive_trained_clustering_positive_embeddings.pdf'%(data_type, unique_id, unique_name))
 
 
+def dim_reduction(encodings, labels, save_path, plot_name, label_names, reduction_type='TSNE'):
+    # Only supports up to 20 classes
+    # Its assumed labels contain values 0, ..., n for some natural n.
+    # List of colors taken from https://sashamaps.net/docs/resources/20-colors/
+    colors = [(230, 25, 75), (60, 180, 75), (255, 225, 25), (0, 130, 200), (245, 130, 48), (145, 30, 180), (70, 240, 240), (240, 50, 230), (210, 245, 60), (250, 190, 212), (0, 128, 128), (220, 190, 255), (170, 110, 40), (255, 250, 200), (128, 0, 0), (170, 255, 195), (128, 128, 0), (255, 215, 180), (0, 0, 128), (128, 128, 128), (255, 255, 255), (0, 0, 0)]
+    colors = [np.array(tup) for tup in colors] # convert to arrays
+    colors = [arr/arr.max() for arr in colors] # Normalize so all are <= 1 
+    colors = [tuple(arr) for arr in colors] # Convert back to tuples
+    if reduction_type == 'TSNE':
+        reduced_encodings = TSNE(n_components=2).fit_transform(encodings)
+    elif reduction_type == 'PCA':
+        reduced_encodings = PCA(n_components=2).fit_transform(encodings)
+    elif reduction_type == 'UMAP':
+        reducer = umap.UMAP()
+        reduced_encodings = reducer.fit_transform(encodings)
+        
+
+    fig, ax = plt.subplots()
+    for i in range(int(labels.max())+1):
+        ax.scatter(reduced_encodings[np.where(labels == i)][:, 0], reduced_encodings[np.where(labels == i)][:, 1], c=colors[i], label=label_names[i])
+    #scatter = ax.scatter(reduced_encodings[:, 0], reduced_encodings[:, 1], c=[colors[i] for i in labels], label=labels)
+    #ax.title('Encodings Projected onto 2D')
+    #ax.xlabel('First principal component')
+    #ax.ylabel('Second principal component')
+
+    # Shrink current axis by 20%
+    box = ax.get_position()
+    ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
+
+    # Put a legend to the right of the current axis
+    ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+    
+
+    plt.savefig('%s.pdf'%os.path.join(save_path, plot_name))
+
+
 
 def plot_dendrogram(model, title, file_name, **kwargs):
     # Create linkage matrix and then plot the dendrogram
@@ -356,6 +601,7 @@ def plot_dendrogram(model, title, file_name, **kwargs):
     plt.figure(figsize=(10, 5))
     plt.title(title)
     dendrogram(linkage_matrix, **kwargs)
+    plt.xlabel('Counts')
     plt.savefig(file_name)
 
 
@@ -409,3 +655,18 @@ def plot_negative_and_mortality(negative_data_maps, mortality_data_maps, mortali
     plt.ylabel('Second principal component')
     plt.savefig('../DONTCOMMITplots/%s/%s/%s_mortality_and_negative_embeddings.pdf'%(data_type, unique_id, unique_name))
     plt.close()
+
+
+def detect_incr_loss(losses, n):
+    # Returns True iff the last n values of losses are in non decreasing order.
+    if len(losses) < n:
+        return False
+    else:
+        non_dec = True
+        last_n_losses = losses[-n:]
+        for i in range(len(last_n_losses)-1):
+            if last_n_losses[i+1] < last_n_losses[i]:
+                non_dec = False
+                break
+        
+        return non_dec

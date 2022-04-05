@@ -4,6 +4,7 @@ Temporal Neighborhood Coding (TNC) for unsupervised learning representation of n
 
 from pandas.core.indexes.base import Index
 import torch
+import tnc.alluvial as alluvial
 from torch.utils import data
 import matplotlib.pyplot as plt
 import argparse
@@ -20,7 +21,7 @@ from sklearn.metrics import silhouette_score, davies_bouldin_score, roc_curve
 from sklearn.cluster import AgglomerativeClustering
 from datetime import datetime
 from tnc.models import CNN_Transformer_Encoder, EncoderMultiSignalMIMIC, GRUDEncoder, RnnEncoder, WFEncoder, TST, EncoderMultiSignal, LinearClassifier, RnnPredictor, EncoderMultiSignalMIMIC, CausalCNNEncoder
-from tnc.utils import plot_heatmap, dim_reduction_mixed_clusters, dim_reduction_positive_clusters, plot_pca_trajectory, plot_dendrogram
+from tnc.utils import plot_heatmap, dim_reduction_mixed_clusters, dim_reduction_positive_clusters, plot_pca_trajectory, detect_incr_loss, dim_reduction
 from tnc.evaluations import WFClassificationExperiment, ClassificationPerformanceExperiment
 from statsmodels.tsa import stattools
 from sklearn.decomposition import PCA
@@ -87,20 +88,20 @@ class TNCDataset(data.Dataset):
         self.ACF_nghd_Threshold = ACF_nghd_Threshold
         self.ACF_out_nghd_Threshold = ACF_out_nghd_Threshold
 
-        if not self.adf and not self.acf:
+        if not self.adf and not self.acf and not self.acf_plus:
             self.eta = eta
             self.nghd_size = 3*window_size*eta
         
-        
-        self.acf_avgs = [] # Will store a list of acf values for a given sample. Will be modified on each call to _find_neighbors 
-        for i in range(len(x)):
-            acfs = []
-            sample = x[i]
-            for f in range(sample.shape[-2]):
-                if len(torch.where(sample[1, f, :]==1)[0]) > sample.shape[-2]*0.4: # If more than 40% the data for this feature is observed, compute acf for it. else dont
-                    acfs.append(torch.Tensor(stattools.acf(sample[0, f, :], nlags=sample.shape[-1] - 1)))
-            acfs = torch.stack(acfs)
-            self.acf_avgs.append(torch.mean(acfs, axis=0))
+        if not self.adf:
+            self.acf_avgs = [] # Will store a list of acf values for a given sample. Will be modified on each call to _find_neighbors 
+            for i in range(len(x)):
+                acfs = []
+                sample = x[i]
+                for f in range(sample.shape[-2]):
+                    if len(torch.where(sample[1, f, :]==1)[0]) > sample.shape[-2]*0.4: # If more than 40% the data for this feature is observed, compute acf for it. else dont
+                        acfs.append(torch.abs(torch.Tensor(stattools.acf(sample[0, f, :], nlags=sample.shape[-1] - 1))))
+                acfs = torch.stack(acfs)
+                self.acf_avgs.append(torch.mean(acfs, axis=0))
             
 
 
@@ -183,6 +184,7 @@ class TNCDataset(data.Dataset):
         Note: The T parameter is at most self.T, but can be less if the sample has mising values at the end.'''
         delta = self.window_size
         if self.adf:
+            
             corr = []
             for w_t in range(self.window_size, 4*self.window_size, self.window_size): # Stepping by window_size chunks
                 # 4*window_size is the farthest we'll consider away from t for the neighborhood
@@ -192,7 +194,7 @@ class TNCDataset(data.Dataset):
                     for f in range(x.shape[-2]): # iterating through features
                         # Do ADF test for each feature separately on the window [t-w_t, t+w_t]
                         # x[:, 0, :, :] just isolates the data, leaves out map
-                        p = stattools.adfuller(np.array(x[:, 0, :, :][f][max(start_T,t - w_t):min(end_T, t + w_t)].reshape(-1, )))[1]
+                        p = stattools.adfuller(np.array(x[0, f, :][max(start_T,t - w_t):min(end_T, t + w_t)].reshape(-1,)))[1]
                         p_val += 0.01 if math.isnan(p) else p
                     
                     corr.append(p_val/x.shape[-2]) # append the average p value over the features to corr
@@ -215,6 +217,27 @@ class TNCDataset(data.Dataset):
                 self.eta += 1
             self.nghd_size = self.eta*delta
         
+        '''
+        elif self.acf_plus_plus:
+
+            self.acf_avgs = [] # Will store a list of acf values for a given sample. Will be modified on each call to _find_neighbors 
+            
+            acf_seq = []
+            sample = x.squeeze()
+            for f in range(sample.shape[-2]):
+                acf_seq.append(torch.abs(torch.Tensor(stattools.acf(sample[0, f, t:end_T], nlags=end_T-t - 1))))
+            acf_seq = torch.stack(acf_seq)
+            acf_seq = torch.mean(acf_seq, axis=0) # Average across features
+
+            first_index = np.where(acf_seq < self.ACF_nghd_Threshold)[0][0] if len(np.where(acf_seq < self.ACF_nghd_Threshold)[0]) > 0 else len(acf_seq)
+
+            self.eta = 0
+            while self.eta*self.window_size <= first_index and self.eta < 10:
+                self.eta += 1
+            self.nghd_size = self.eta*delta
+        '''
+
+        # Logging nghd sizes
         if self.nghd_size in nghd_sizes:
             nghd_sizes[self.nghd_size] += 1
         else:
@@ -229,7 +252,7 @@ class TNCDataset(data.Dataset):
         # Stacking together windows in the same nghd
         x_p = torch.stack([x[:, :, t_ind-self.window_size//2:t_ind+self.window_size//2] for t_ind in t_p])
         return x_p
-
+    
     def _find_non_neighbors(self, x, t, start_T, end_T, index):
         '''Will find non neighbors of the neighbordhood centered at t. x is a tensor for a single sample, shape is (1, num_features, signal_length) if we have no map, (2, num_features, signal_length) if we do
         Note: The T parameter is at most self.T, but can be less if the sample has mising values at the end.'''
@@ -329,90 +352,52 @@ class TNCDataset(data.Dataset):
 
 ######################################################################################################
 
-def linear_classifier_epoch_run(data, labels, train, num_pre_positive_encodings, batch_size, rnn, classifier, optimizer, encoder):
+def linear_classifier_epoch_run(dataset, train, classifier, optimizer, data_type, window_size, encoder, encoding_size):
     if train:
-        rnn.train()
         classifier.train()
     else:
-        rnn.eval()
         classifier.eval()
     
     epoch_losses = []
     epoch_predictions = []
     epoch_labels = []
-    for i in range(data.shape[0]//batch_size): # Split into batches for training
-        if i == data.shape[0]//batch_size - 1:
-            data_batch = data[i*batch_size:]
-            label_batch = labels[i*batch_size:].to(device)    
-        else:
-            data_batch = data[i*batch_size: (i+1)*batch_size] # of shape (batch_size, 2, num_features, seq_len)
-            label_batch = labels[i*batch_size: (i+1)*batch_size].to(device) # of shape (batch_size,)
+    for data_batch, label_batch in dataset:
+        if data_type == 'ICU':
+            data_batch = data_batch[:, :, :, -720:] # Take just the last hr of data
+            label_batch = label_batch[:, -720:]
         
         
-        
-        
-        
-        # encoding_batch is of shape (batch_size, seq_len/window_size, encoding_size)
-        #encoding_batch, encoding_mask = encoder.forward_seq(data_batch, return_encoding_mask=True) # encoding_mask is of shape (batch_size, seq_len/window_size)
-        encoding_batch = encoder.forward_seq(data_batch)
+        # data is of shape (num_samples, num_encodings_per_sample, encoding_size)
+        encoding_batch, encoding_mask = encoder.forward_seq(data_batch, return_encoding_mask=True)
         encoding_batch = encoding_batch.to(device)
-        #encoding_mask = encoding_mask.to(device)
+
+        if data_type == None:
+            # Takes every window_size'th label for each sample (so it matches the frequency of encodings)
+            # Then reshapes to be of shape (num_samples*num_encodings_per_sample)
+            label_batch = label_batch[:, window_size-1::window_size].to(device)
+            
+            label_batch = label_batch.reshape(-1,)
+            
+            # Now the encodings are of shape (num_samples*num_encodings_per_sample, encoding_size)
+            # and the masks are of shape (num_samples*num_encodings_per_sample)
+            encoding_batch, encoding_mask = encoding_batch.reshape(-1, encoding_size), encoding_mask.reshape(-1,)
+            
+            # Now we'll remove encodings that were derived from fully imputed data
+            encoding_batch = encoding_batch[torch.where(encoding_mask != -1)]
+            
+            # Remove the corresponding labels
+            label_batch = label_batch[torch.where(encoding_mask != -1)]
+            
+            # Now encoding_batch is of shape (num_encodings_kept, encoding_size)
+            # and label_batch is of shape (num_encodings_kept,)
+
+        elif data_type == 'HiRID' or data_type == 'ICU':
+            label_batch = torch.Tensor([1 in label for label in label_batch]).to(device)
+            
+            # So now encoding_batch is of shape (num_samples, num_windows_per_sample, encoding_size)
+            # and train_labels is of shape (num_samples,)
+        predictions = torch.squeeze(classifier(encoding_batch)) # of shape (bs,)
         
-
-        # encoding_batch and label_batch are of size (batch_size, seq_len/window_size, encoding_size) and (batch_size)
-        rnn_window_size = int(torch.randint(low=1, high=4, size=(1,))) # generates a number between 1 and 3 inclusive. This is the number of encodings the rnn will be fed at a time
-        positive_inds = torch.where(label_batch==1)
-        #positive_encodings = encoding_batch[positive_inds] # of shape (num_pos_in_batch, seq_len/window_size, encoding_size)
-        #positive_encodings_mask = encoding_mask[positive_inds] # of shape (num_pos_in_batch, seq_len/window_size)
-        
-        
-        negative_inds = torch.where(label_batch==0)
-        #negative_encodings = encoding_batch[negative_inds] # of shape (num_neg_in_batch, seq_len/window_size, encoding_size)
-        #negative_encodings_mask = encoding_mask[negative_inds] # of shape (num_neg_in_batch, seq_len/window_size)
-
-        '''
-        positive_encodings = positive_encodings[:, -num_pre_positive_encodings:, :] # now of shape (num_pos_in_batch, num_pre_positive_encodings, encoding_size)
-        positive_encodings_mask = positive_encodings_mask[:, -num_pre_positive_encodings:] # now of shape (num_pos_in_batch, num_pre_positive_encodings)
-        
-
-        positive_encodings = positive_encodings[:, -(positive_encodings.shape[1]//rnn_window_size)*rnn_window_size:, :] # Clips each sample on the left side so the number of encodings is divisible by rnn_window_size
-        positive_encodings_mask = positive_encodings_mask[:, -(positive_encodings_mask.shape[1]//rnn_window_size)*rnn_window_size:]
-        negative_encodings = negative_encodings[:, -(negative_encodings.shape[1]//rnn_window_size)*rnn_window_size:, :]
-        negative_encodings_mask = negative_encodings_mask[:, -(negative_encodings_mask.shape[1]//rnn_window_size)*rnn_window_size:]
-
-
-        negative_encodings = negative_encodings.reshape(-1, rnn_window_size, negative_encodings.shape[-1]) # Now of shape (num_neg_rnn_window_sizes_over_all_encodings, rnn_window_size, encoding_size)
-        positive_encodings = positive_encodings.reshape(-1, rnn_window_size, positive_encodings.shape[-1]) # Now of shape (num_pos_rnn_window_sizes_over_all_encodings, rnn_window_size, encoding_size)
-        negative_encodings_mask = negative_encodings_mask.reshape(-1, rnn_window_size) # Now of shape (num_neg_rnn_window_sizes_over_all_encodings, rnn_window_size)
-        positive_encodings_mask = positive_encodings_mask.reshape(-1, rnn_window_size) # Now of shape (num_pos_rnn_window_sizes_over_all_encodings, rnn_window_size)
-
-        # Now we'll do the mode of each rnn window of encodings. So for each sequence of encodings, we'll take the mode value of the mask
-        negative_encodings_mask = torch.mode(negative_encodings_mask, dim=1)[0] # of shape (num_neg_rnn_window_sizes_over_all_encodings,)
-        positive_encodings_mask = torch.mode(positive_encodings_mask, dim=1)[0] # of shape (num_pos_rnn_window_sizes_over_all_encodings,)
-
-        neg_window_labels = torch.zeros(negative_encodings.shape[0], 1)
-        pos_window_labels = torch.ones(positive_encodings.shape[0], 1)
-        
-
-        window_samples = torch.vstack([positive_encodings, negative_encodings]) # of shape (num_rnn_window_sizes_over_all_encodings, rnn_window_size, encoding_size)
-        window_labels = torch.cat([pos_window_labels, neg_window_labels]) # of shape (num_rnn_window_sizes_over_all_encodings, 1)
-        window_masks = torch.cat([positive_encodings_mask, negative_encodings_mask]) # of shape (num_rnn_window_sizes_over_all_encodings,)
-
-        # Remove all sequences of encodings that were at least partly derived from fully imputed data.
-        window_samples = window_samples[torch.where(window_masks!=-1)]
-        window_labels = window_labels[torch.where(window_masks!=-1)]
-
-        '''
-    
-
-        _, hidden_and_cell = rnn(encoding_batch)
-        hidden_state = hidden_and_cell[0] # hidden state is of shape (1, batch_size, hidden_size). Contains the last hidden state for each sample in the batch
-        hidden_state = torch.squeeze(hidden_state)
-        
-        predictions = torch.squeeze(classifier(hidden_state)) # of shape (bs,)
-        # Shape of predictions and window_labels is (batch_size)
-        #window_labels = torch.squeeze(window_labels).to(device)
-        # print('Manually setting pos_weight to 10')
         pos_weight = torch.Tensor([10]).to(device)
         if train:
             # Ratio of num negative examples divided by num positive examples is pos_weight
@@ -450,31 +435,32 @@ def linear_classifier_epoch_run(data, labels, train, num_pre_positive_encodings,
     
     return epoch_predictions, epoch_losses, epoch_labels
 
-def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST, y_TEST, encoding_size, num_pre_positive_encodings, encoder, batch_size=32, return_models=False, return_scores=False, pos_sample_name='arrest', data_type='ICU', classification_cv=0, encoder_cv=0):
+def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST, y_TEST, encoding_size, num_pre_positive_encodings, encoder, window_size, batch_size=32, return_models=False, return_scores=False, pos_sample_name='arrest', data_type='ICU', classification_cv=0, encoder_cv=0, ckpt_path="../ckpt",  plt_path="../DONTCOMMITplots", classifier_name=""):
     '''
-    Trains an RNN and linear classifier jointly. X_train is of shape (num_samples, num_windows_per_hour, encoding_size)
-    and y_train is of shape (num_samples)
+    Trains a classifier to predict positive events in samples.
+    X_train is of shape (num_train_samples, 2, num_features, seq_len)
+    y_train is of shape (num_train_samples, seq_len)
 
     '''
-
     print("Training Linear Classifier", flush=True)
-    rnn = RnnPredictor(encoding_size=encoding_size, hidden_size=32).to(device)
-    # 32 is the arbitrary hidden size chosen for the RNN
-    classifier = LinearClassifier(input_size=32).to(device)
-    
+    if data_type==None:
+        classifier = LinearClassifier(input_size=encoding_size).to(device)
 
-    if len(tuple(y_train.shape)) == 2: # If labels are in 2D array
-        y_train = torch.squeeze(y_train)
-        y_validation = torch.squeeze(y_validation) # Make them 1D (e.g. 32 instead of 32x1)
-    print('--==')
-    print(X_train.shape)
-    print(y_train.shape)
-    print(X_validation.shape)
-    print(y_validation.shape)
-    print(X_TEST.shape)
-    print(y_TEST.shape)
+    elif data_type=='HiRID' or data_type == 'ICU':
+        classifier = RnnPredictor(encoding_size=encoding_size, hidden_size=8).to(device)
+        
+   
     
-    params = list(classifier.parameters()) + list(rnn.parameters())
+    print('X_train shape: ', X_train.shape)
+    print('batch_size: ', batch_size)
+    train_dataset = torch.utils.data.TensorDataset(X_train, y_train)
+    train_data_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    validation_dataset = torch.utils.data.TensorDataset(X_validation, y_validation)
+    validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, shuffle=True)
+    TEST_dataset = torch.utils.data.TensorDataset(X_TEST, y_TEST)
+    TEST_data_loader = torch.utils.data.DataLoader(TEST_dataset, batch_size=batch_size, shuffle=True)
+    
+    params = list(classifier.parameters())
     lr = .001
     weight_decay = .005
     print('Learning Rate for classifier training: ', lr)
@@ -483,29 +469,25 @@ def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST
     train_losses = []
     valid_losses = []
     
-    for epoch in range(1, 101):
+    for epoch in range(1, 501):
         encoder.eval()
-
-        epoch_train_predictions, epoch_train_losses, epoch_train_labels = linear_classifier_epoch_run(data=X_train, labels=y_train, train=True, 
-                                                    num_pre_positive_encodings=num_pre_positive_encodings,
-                                                    batch_size=batch_size, rnn=rnn, classifier=classifier,
-                                                    optimizer=optimizer, encoder=encoder)
+        # linear_classifier_epoch_run(dataset, train, classifier, optimizer, data_type, window_size, encoder, encoding_size):
+        epoch_train_predictions, epoch_train_losses, epoch_train_labels = linear_classifier_epoch_run(dataset=train_data_loader, train=True,
+                                                    classifier=classifier,
+                                                    optimizer=optimizer, data_type=data_type, window_size=window_size, encoder=encoder, encoding_size=encoding_size)
 
         
         classifier.eval()
-        rnn.eval()
-        epoch_validation_predictions, epoch_validation_losses, epoch_validation_labels = linear_classifier_epoch_run(data=X_validation, labels=y_validation, train=False, 
-                                                    num_pre_positive_encodings=num_pre_positive_encodings,
-                                                    batch_size=batch_size, rnn=rnn, classifier=classifier,
-                                                    optimizer=optimizer, encoder=encoder)
+        epoch_validation_predictions, epoch_validation_losses, epoch_validation_labels = linear_classifier_epoch_run(dataset=validation_data_loader, train=False,
+                                                    classifier=classifier,
+                                                    optimizer=optimizer, data_type=data_type, window_size=window_size, encoder=encoder, encoding_size=encoding_size)
 
         
         
 
-        epoch_TEST_predictions, epoch_TEST_losses, epoch_TEST_labels = linear_classifier_epoch_run(data=X_TEST, labels=y_TEST, train=False, 
-                                                    num_pre_positive_encodings=num_pre_positive_encodings,
-                                                    batch_size=batch_size, rnn=rnn, classifier=classifier,
-                                                    optimizer=optimizer, encoder=encoder)
+        epoch_TEST_predictions, epoch_TEST_losses, epoch_TEST_labels = linear_classifier_epoch_run(dataset=TEST_data_loader, train=False,
+                                                    classifier=classifier,
+                                                    optimizer=optimizer, data_type=data_type, window_size=window_size, encoder=encoder, encoding_size=encoding_size)
 
         
         # TRAIN 
@@ -546,26 +528,29 @@ def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST
         epoch_TEST_auprc = auc(TEST_recall, TEST_precision) # precision is the y axis, recall is the x axis, computes AUC of this curve
         
 
-        if epoch%10==0:
+        if epoch%10==0 or detect_incr_loss(valid_losses, 5):
             print('Epoch %d Classifier Loss =====> Training Loss: %.5f \t Training AUROC: %.5f \t Training AUPRC: %.5f\t Validation Loss: %.5f \t Validation AUROC: %.5f \t Validation AUPRC %.5f\t TEST Loss: %.5f \t TEST AUROC: %.5f \t TEST AUPRC %.5f'
                                 % (epoch, epoch_train_loss, epoch_train_auroc, epoch_train_auprc, epoch_validation_loss, epoch_validation_auroc, epoch_validation_auprc, epoch_TEST_loss, epoch_TEST_auroc, epoch_TEST_auprc))
-            epoch_train_predictions[epoch_train_predictions >= 0.5] = 1
-            epoch_train_predictions[epoch_train_predictions < 0.5] = 0
+            epoch_train_predictions_thresholded = torch.clone(epoch_train_predictions)
+            epoch_train_predictions_thresholded[epoch_train_predictions_thresholded >= 0.5] = 1
+            epoch_train_predictions_thresholded[epoch_train_predictions_thresholded < 0.5] = 0
 
-            epoch_validation_predictions[epoch_validation_predictions >= 0.5] = 1
-            epoch_validation_predictions[epoch_validation_predictions < 0.5] = 0
+            epoch_validation_predictions_thresholded = torch.clone(epoch_validation_predictions)
+            epoch_validation_predictions_thresholded[epoch_validation_predictions_thresholded >= 0.5] = 1
+            epoch_validation_predictions_thresholded[epoch_validation_predictions_thresholded < 0.5] = 0
 
-            epoch_TEST_predictions[epoch_TEST_predictions >= 0.5] = 1
-            epoch_TEST_predictions[epoch_TEST_predictions < 0.5] = 0
+            epoch_TEST_predictions_thresholded = torch.clone(epoch_TEST_predictions)
+            epoch_TEST_predictions_thresholded[epoch_TEST_predictions_thresholded >= 0.5] = 1
+            epoch_TEST_predictions_thresholded[epoch_TEST_predictions_thresholded < 0.5] = 0
             
             print("Train classification report: ")
-            print('epoch_train_labels shape: ', epoch_train_labels.shape, 'epoch_train_predictions shape: ', epoch_train_predictions.shape)
-            print(classification_report(epoch_train_labels.to('cpu'), epoch_train_predictions, target_names=['normal', pos_sample_name]))
+            print('epoch_train_labels shape: ', epoch_train_labels.shape, 'epoch_train_predictions_thresholded shape: ', epoch_train_predictions_thresholded.shape)
+            print(classification_report(epoch_train_labels.to('cpu'), epoch_train_predictions_thresholded, target_names=['normal', pos_sample_name]))
             print("Validation classification report: ")
-            print(classification_report(epoch_validation_labels.to('cpu'), epoch_validation_predictions, target_names=['normal', pos_sample_name]))
+            print(classification_report(epoch_validation_labels.to('cpu'), epoch_validation_predictions_thresholded, target_names=['normal', pos_sample_name]))
             print()
             print("TEST classification report: ")
-            print(classification_report(epoch_TEST_labels.to('cpu'), epoch_TEST_predictions, target_names=['normal', pos_sample_name]))
+            print(classification_report(epoch_TEST_labels.to('cpu'), epoch_TEST_predictions_thresholded, target_names=['normal', pos_sample_name]))
             print()
 
 
@@ -573,12 +558,12 @@ def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST
 
             state = {
                     'epoch': epoch,
-                    'rnn_state_dict': rnn.state_dict(),
                     'classifier_state_dict': classifier.state_dict(),
                 }
 
-            torch.save(state, '../ckpt/%s/%s_encoder_checkpoint_%d_Classifier_checkpoint_%d.tar'%(data_type, UNIQUE_ID, encoder_cv, classification_cv))
-    
+            torch.save(state, os.path.join(ckpt_path, '%s/%s_encoder_checkpoint_%d_%sClassifier_checkpoint_%d.tar'%(data_type, UNIQUE_ID, encoder_cv, classifier_name, classification_cv)))
+            if detect_incr_loss(valid_losses, 5):
+                break
     
     # Plot ROC and PR Curves
     plt.figure()
@@ -586,7 +571,7 @@ def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST
     plt.title('Train Precision Recall Curve')
     plt.xlabel('Recall')
     plt.ylabel('Precision')
-    plt.savefig('../DONTCOMMITplots/%s/%s/train_PR_curve_%d_%d.pdf'%(data_type, UNIQUE_ID, encoder_cv, classification_cv))
+    plt.savefig(os.path.join(plt_path, '%s/%s/train_PR_curve_%d_%d.pdf'%(data_type, UNIQUE_ID, encoder_cv, classification_cv)))
 
     plt.figure()
     fpr, tpr, _ = roc_curve(epoch_train_labels, epoch_train_predictions)
@@ -594,7 +579,7 @@ def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST
     plt.xlabel('FPR')
     plt.ylabel('TPR')
     plt.title('Train ROC Curve')
-    plt.savefig('../DONTCOMMITplots/%s/%s/train_ROC_curve_%d_%d.pdf'%(data_type, UNIQUE_ID, encoder_cv, classification_cv))
+    plt.savefig(os.path.join(plt_path, '%s/%s/train_ROC_curve_%d_%d.pdf'%(data_type, UNIQUE_ID, encoder_cv, classification_cv)))
     
     
     
@@ -603,7 +588,7 @@ def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST
     plt.title('Validation Precision Recall Curve')
     plt.xlabel('Recall')
     plt.ylabel('Precision')
-    plt.savefig('../DONTCOMMITplots/%s/%s/valid_PR_curve_%d_%d.pdf'%(data_type, UNIQUE_ID, encoder_cv, classification_cv))
+    plt.savefig(os.path.join(plt_path, '%s/%s/valid_PR_curve_%d_%d.pdf'%(data_type, UNIQUE_ID, encoder_cv, classification_cv)))
 
     plt.figure()
     fpr, tpr, _ = roc_curve(epoch_validation_labels, epoch_validation_predictions)
@@ -611,14 +596,14 @@ def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST
     plt.xlabel('FPR')
     plt.ylabel('TPR')
     plt.title('Validation ROC Curve')
-    plt.savefig('../DONTCOMMITplots/%s/%s/valid_ROC_curve_%d_%d.pdf'%(data_type, UNIQUE_ID, encoder_cv, classification_cv))
+    plt.savefig(os.path.join(plt_path, '%s/%s/valid_ROC_curve_%d_%d.pdf'%(data_type, UNIQUE_ID, encoder_cv, classification_cv)))
 
     plt.figure()
     plt.plot(TEST_recall, TEST_precision)
     plt.title('TEST Precision Recall Curve')
     plt.xlabel('Recall')
     plt.ylabel('Precision')
-    plt.savefig('../DONTCOMMITplots/%s/%s/TEST_PR_curve_%d_%d.pdf'%(data_type, UNIQUE_ID, encoder_cv, classification_cv))
+    plt.savefig(os.path.join(plt_path, '%s/%s/TEST_PR_curve_%d_%d.pdf'%(data_type, UNIQUE_ID, encoder_cv, classification_cv)))
 
     plt.figure()
     fpr, tpr, _ = roc_curve(epoch_TEST_labels, epoch_TEST_predictions)
@@ -626,20 +611,20 @@ def train_linear_classifier(X_train, y_train, X_validation, y_validation, X_TEST
     plt.xlabel('FPR')
     plt.ylabel('TPR')
     plt.title('TEST ROC Curve')
-    plt.savefig('../DONTCOMMITplots/%s/%s/TEST_ROC_curve_%d_%d.pdf'%(data_type, UNIQUE_ID, encoder_cv, classification_cv))
+    plt.savefig(os.path.join(plt_path, '%s/%s/TEST_ROC_curve_%d_%d.pdf'%(data_type, UNIQUE_ID, encoder_cv, classification_cv)))
 
     # Plot Loss curves
     plt.figure()
-    plt.plot(np.arange(1, 101), train_losses, label="Train")
-    plt.plot(np.arange(1, 101), valid_losses, label="Validation")
+    plt.plot(np.arange(1, len(train_losses) + 1), train_losses, label="Train")
+    plt.plot(np.arange(1, len(valid_losses) + 1), valid_losses, label="Validation")
     plt.title("Loss")
     plt.legend()
-    plt.savefig(os.path.join("../DONTCOMMITplots/%s/%s"%(data_type, UNIQUE_ID), "%s_Classifier_loss_%d_%d.pdf"%(UNIQUE_NAME, encoder_cv, classification_cv)))
+    plt.savefig(os.path.join(plt_path, "%s/%s"%(data_type, UNIQUE_ID), "%s_Classifier_loss_%d_%d.pdf"%(UNIQUE_NAME, encoder_cv, classification_cv)))
 
     if return_models and return_scores:
-        return (rnn, classifier, epoch_validation_auroc, epoch_validation_auprc, epoch_TEST_auroc, epoch_TEST_auprc)
+        return (classifier, epoch_validation_auroc, epoch_validation_auprc, epoch_TEST_auroc, epoch_TEST_auprc)
     if return_models:
-        return (rnn, classifier)
+        return (classifier)
     if return_scores:
         return (epoch_validation_auroc, epoch_validation_auroc)
 
@@ -670,7 +655,7 @@ def get_encoder(encoder_type, encoder_hyper_params):
 
 
 
-def epoch_run(loader, disc_model, encoder, device, w=0, optimizer=None, train=True, remove_w=False):
+def epoch_run(loader, disc_model, encoder, device, pruning_mask, w=0, optimizer=None, train=True, acf_plus=False, compute_pruning_mask=False):
     if train: # Puts encoder and discriminator into train mode
         encoder.train()
         disc_model.train()
@@ -682,9 +667,11 @@ def epoch_run(loader, disc_model, encoder, device, w=0, optimizer=None, train=Tr
     encoder.to(device)
     disc_model.to(device)
     
+    # pruning_mask is of shape (encoding_size,). 1 for dimensions to keep, 0 for ones to prune
     epoch_loss = 0
     epoch_acc = 0
     batch_count = 0
+    epoch_correlations = []
     for x_t, x_p, x_n, _ in loader:
         # x_t is of shape (batch_size, m, num_features, window_size), where m=1 if we have no maps, m=2 if we do. It is a window of data
         # x_p is of shape (batch_size, mc_sample_size, m, num_features, window_size) (where m=1 if we have no maps, m=2 if we do), so its a 'list' 
@@ -710,12 +697,22 @@ def epoch_run(loader, disc_model, encoder, device, w=0, optimizer=None, train=Tr
 
         neighbors = torch.ones((len(x_p))).to(device)
         non_neighbors = torch.zeros((len(x_n))).to(device)
-        x_t, x_p, x_n = x_t.to(device), x_p.to(device), x_n.to(device)
+        x_t, x_p, x_n = x_t.squeeze().to(device), x_p.squeeze().to(device), x_n.squeeze().to(device)
         
-        z_t = encoder(x_t)
-        z_p = encoder(x_p)
-        z_n = encoder(x_n) # z_t, z_p, and z_n are now all of size (batch_size*mc_sample_size, encoding_size)
+        z_t = encoder(x_t, return_pruned=False)
+        z_p = encoder(x_p, return_pruned=False)
+        z_n = encoder(x_n, return_pruned=False) # z_t, z_p, and z_n are now all of size (batch_size*mc_sample_size, encoding_size)
         
+        if compute_pruning_mask:
+            encodings = torch.vstack([z_t[:, pruning_mask], z_p[:, pruning_mask], z_n[:, pruning_mask]]) # Now of shape (num_encodings, pruned encoding_size)
+            encodings = torch.transpose(encodings, 0, 1) # Swap dims 0 and 1. Now each row is an encoding dimension
+            corrs = torch.corrcoef(encodings)
+            corrs = torch.abs(corrs)
+            epoch_correlations.append(corrs)
+        
+        z_t *= pruning_mask
+        z_p *= pruning_mask
+        z_n *= pruning_mask # Sets encoding dimensions where pruning_mask is =0, to 0.
 
         
         d_p = disc_model(z_t, z_p)
@@ -724,9 +721,9 @@ def epoch_run(loader, disc_model, encoder, device, w=0, optimizer=None, train=Tr
         p_loss = loss_fn(d_p, neighbors)
         n_loss = loss_fn(d_n, non_neighbors)
         n_loss_u = loss_fn(d_n, neighbors)
-        if not remove_w:
+        if not acf_plus:
             loss = (p_loss + w*n_loss_u + (1-w)*n_loss)/2
-        else: #remove_w is True
+        else: #acf_plus is True
             loss = (p_loss + n_loss)/2
         
         
@@ -742,10 +739,47 @@ def epoch_run(loader, disc_model, encoder, device, w=0, optimizer=None, train=Tr
         batch_count += 1
         
         x_t, x_p, x_n = x_t.to('cpu'), x_p.to('cpu'), x_n.to('cpu') # Move back to cpu
-    return epoch_loss/batch_count, epoch_acc/batch_count
+    
+    if compute_pruning_mask:
+        epoch_correlations = torch.stack(epoch_correlations) # Of shape (num_batches, pruned encoding_size, pruned encoding_size). Note: pruned encoding_size is just encoding_size at the start
+        num_batches, _, _ = epoch_correlations.shape
+        print('Epoch correlations:')
+        print(torch.mean(epoch_correlations, dim=0)) # average over batch
+
+        removed = [i for i in range(len(pruning_mask)) if pruning_mask[i] == 0]
+        print('removed: ', removed)
+        print('pruning_mask: ', pruning_mask)
+        remaining_indices = torch.where(pruning_mask==1)[0]
+        print('remaining indices: ', remaining_indices)
+        print('epoch_correlations shape: ', epoch_correlations.shape)
+        counter = 0
+        for i in range(epoch_correlations.shape[1]):
+            if counter >= 1: # Allowed to remove only 1 dimension at a time
+                break
+            for j in range(i+1, epoch_correlations.shape[1]):
+                if counter >= 1:
+                    break
+                print(i, j)
+                if torch.sum(epoch_correlations[:, i, j] > 0.9) == num_batches and i not in removed:
+                    removed.append(i)
+                    remaining_indices[i] = -1
+                    counter += 1
+                    print('removed dim: ', i)
+        print('num indices removed: ', counter)
+        remaining_indices = torch.Tensor([i for i in remaining_indices if i != -1]).int()
+        print('remaining_indices after pruning: ', remaining_indices)
+        pruning_mask = torch.zeros_like(pruning_mask)
+        for ind in remaining_indices:
+            pruning_mask[ind] = 1
+        
+        print('pruning_mask after pruning: ', pruning_mask)
+        # update encoder
+        encoder.pruning_mask = pruning_mask
+        encoder.pruned_encoding_size = int(torch.sum(encoder.pruning_mask))
+    return epoch_loss/batch_count, epoch_acc/batch_count, pruning_mask
 
 
-def learn_encoder(data_maps, labels, encoder_type, encoder_hyper_params, pretrain_hyper_params, window_size, w, batch_size, lr=0.001, decay=0.005, mc_sample_size=20,
+def learn_encoder(data_maps, encoder_type, encoder_hyper_params, pretrain_hyper_params, window_size, w, batch_size, lr=0.001, decay=0.005, mc_sample_size=20,
                   n_epochs=100, data_type='simulation', device='cpu', n_cross_val_encoder=1, cont=False, ETA=None, ADF=True, ACF=False, ACF_PLUS=False, ACF_nghd_Threshold=0.4, ACF_out_nghd_Threshold=0.4):
     
     # x is of shape (num_samples, num_features, signal_length) OR (num_samples, 2, num_features, signal_length) if we have maps for
@@ -757,7 +791,8 @@ def learn_encoder(data_maps, labels, encoder_type, encoder_hyper_params, pretrai
         print("LEARN ENCODER CV: ", cv)
         encoder = get_encoder(encoder_type=encoder_type, encoder_hyper_params=encoder_hyper_params)
         encoder = encoder.to(device)
-        disc_model = Discriminator(encoder.encoding_size, device)
+        pruning_mask = torch.ones(encoder_hyper_params['encoding_size']).bool().to(device)
+        disc_model = Discriminator(encoder_hyper_params['encoding_size'], device)
         params = list(disc_model.parameters()) + list(encoder.parameters())
         optimizer = torch.optim.Adam(params, lr=lr, weight_decay=decay)
 
@@ -772,24 +807,19 @@ def learn_encoder(data_maps, labels, encoder_type, encoder_hyper_params, pretrai
                 print('Restarting from checkpoint')
                 checkpoint = torch.load('../ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, cv))
                 encoder.load_state_dict(checkpoint['encoder_state_dict'])
-                disc_model = disc_model.load_state_dict(checkpoint['discriminator_state_dict'])
+                encoder.pruning_mask = checkpoint['pruning_mask']
+                encoder.pruned_encoding_size = int(torch.sum(encoder.pruning_mask))
+                disc_model.load_state_dict(checkpoint['discriminator_state_dict']) 
                 epoch_start = checkpoint['epoch'] + 1 # starting point for epochs is whatever was saved last + 1 (i.e. if we finished epoch 10 before saving, want to start on 11)
                 performance = checkpoint['performance']
         
         inds = np.arange(len(data_maps))
         random.shuffle(inds)
         data_maps = data_maps[inds]
-        labels = labels[inds]
 
         train_data = data_maps[0:int(0.8*len(data_maps))]
-        train_labels = labels[0:int(0.8*len(labels))]
         validation_data = data_maps[int(0.8*len(data_maps)):]
-        validation_labels = labels[int(0.8*len(labels)):]
 
-        if len(tuple(train_data.shape)) == 3: # if train_data is of shape (num_samples, num_features, signal_length)
-            # reshape to (num_samples, 1, num_features, signal_length)
-            train_data = torch.reshape(train_data, (train_data.shape[0], 1, train_data.shape[1], train_data.shape[2]))
-            validation_data = torch.reshape(validation_data, (validation_data.shape[0], 1, validation_data.shape[1], validation_data.shape[2]))
         
         print("ETA, ADF, ACF, ACF_PLUS: ", ETA, ADF, ACF, ACF_PLUS)
         if not ADF and not ACF and not ACF_PLUS:
@@ -803,11 +833,11 @@ def learn_encoder(data_maps, labels, encoder_type, encoder_hyper_params, pretrai
             print("USING ACF_PLUS")
             
         trainset = TNCDataset(x=train_data, mc_sample_size=mc_sample_size,
-                                window_size=window_size, eta=ETA, state=train_labels, adf=ADF, acf=ACF, acf_plus=ACF_PLUS, ACF_nghd_Threshold=ACF_nghd_Threshold, ACF_out_nghd_Threshold=ACF_out_nghd_Threshold)
+                                window_size=window_size, eta=ETA, adf=ADF, acf=ACF, acf_plus=ACF_PLUS, ACF_nghd_Threshold=ACF_nghd_Threshold, ACF_out_nghd_Threshold=ACF_out_nghd_Threshold)
         
         print('Done with TNCDataset for train data. Moving on to validation data...')
         validset = TNCDataset(x=validation_data, mc_sample_size=mc_sample_size,
-                                window_size=window_size, eta=ETA, state=validation_labels, adf=ADF, acf=ACF, acf_plus=ACF_PLUS, ACF_nghd_Threshold=ACF_nghd_Threshold, ACF_out_nghd_Threshold=ACF_out_nghd_Threshold)
+                                window_size=window_size, eta=ETA, adf=ADF, acf=ACF, acf_plus=ACF_PLUS, ACF_nghd_Threshold=ACF_nghd_Threshold, ACF_out_nghd_Threshold=ACF_out_nghd_Threshold)
 
         print("Done making TNCDataset object for validation data")
 
@@ -815,11 +845,19 @@ def learn_encoder(data_maps, labels, encoder_type, encoder_hyper_params, pretrai
         valid_loader = data.DataLoader(validset, batch_size=batch_size, shuffle=True)
 
         
+        
         if epoch_start < n_epochs-1:
             for epoch in range(epoch_start, n_epochs+1):
-                epoch_loss, epoch_acc = epoch_run(train_loader, disc_model, encoder, optimizer=optimizer,
-                                                w=w, train=True, device=device, remove_w=ACF_PLUS)
-                validation_loss, validation_acc = epoch_run(valid_loader, disc_model, encoder, train=False, w=w, device=device, remove_w=ACF_PLUS)
+                print('Epoch: ', epoch)
+                if epoch % 30 == 0 and not ADF and epoch < n_epochs - 30 and epoch != 0:
+                    compute_mask = True
+                else:
+                    compute_mask = False
+
+                
+                epoch_loss, epoch_acc, pruning_mask = epoch_run(train_loader, disc_model, encoder, optimizer=optimizer,
+                                                w=w, train=True, device=device, acf_plus=ACF_PLUS, compute_pruning_mask=compute_mask, pruning_mask=pruning_mask)
+                validation_loss, validation_acc, _ = epoch_run(valid_loader, disc_model, encoder, train=False, w=w, device=device, acf_plus=ACF_PLUS, compute_pruning_mask=False, pruning_mask=pruning_mask)
                 
                 performance.append((epoch_loss, validation_loss, epoch_acc, validation_acc))
                 if epoch%10 == 0:
@@ -839,7 +877,31 @@ def learn_encoder(data_maps, labels, encoder_type, encoder_hyper_params, pretrai
                         'unique_id': UNIQUE_ID,
                         'unique_name': UNIQUE_NAME,
                         'data_type': DATA_TYPE,
-                        'encoder_type': ENCODER_TYPE
+                        'encoder_type': ENCODER_TYPE,
+                        'pruning_mask': pruning_mask
+                    }
+
+                    torch.save(state, '../ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, cv))
+                
+                elif ADF: # If ADF, save checkpoint every epoch
+                    print('(cv:%s)Epoch %d Encoder Loss =====> Training Loss: %.5f \t Training Accuracy: %.5f \t Validation Loss: %.5f \t Validation Accuracy: %.5f'
+                        % (cv, epoch, epoch_loss, epoch_acc, validation_loss, validation_acc))
+                    
+                    state = {
+                        'epoch': epoch,
+                        'encoder_state_dict': encoder.state_dict(),
+                        'discriminator_state_dict': disc_model.state_dict(),
+                        'best_accuracy': validation_acc,
+                        'performance': performance,
+                        'encoder_hyper_params': encoder_hyper_params,
+                        'learn_encoder_hyper_params': LEARN_ENCODER_HYPER_PARAMS,
+                        'classification_hyper_params': CLASSIFICATION_HYPER_PARAMS,
+                        'pretrain_hyper_params': PRETRAIN_HYPER_PARAMS,
+                        'unique_id': UNIQUE_ID,
+                        'unique_name': UNIQUE_NAME,
+                        'data_type': DATA_TYPE,
+                        'encoder_type': ENCODER_TYPE,
+                        'pruning_mask': pruning_mask
                     }
 
                     torch.save(state, '../ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, cv))
@@ -885,7 +947,7 @@ def learn_encoder(data_maps, labels, encoder_type, encoder_hyper_params, pretrai
     return encoder
 
 
-def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_encoder_hyper_params, classification_hyper_params, cont, pretrain_hyper_params, plot_embeddings, unique_id, unique_name, DEBUG=False):
+def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_encoder_hyper_params, classification_hyper_params, cont, pretrain_hyper_params, plot_embeddings, unique_id, unique_name, DEBUG=False, circulatory_failure=False):
     torch.cuda.empty_cache()
     global UNIQUE_NAME
     UNIQUE_NAME=unique_name
@@ -947,25 +1009,46 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
             TEST_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'test_mixed_data_maps.npy')))
             TEST_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'test_mixed_labels.npy')))
             train_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_mixed_data_maps.npy')))
-            train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_mixed_labels.npy'))) 
+            train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_mixed_labels.npy')))
+
+            # Used for training encoder
+            TEST_encoder_data_maps = torch.from_numpy(np.load(os.path.join(path, 'test_mixed_data_maps.npy')))
+            train_encoder_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_mixed_data_maps.npy')))
+            
+            if learn_encoder_hyper_params['ADF']:
+                print('USING ADF')
+                TEST_mixed_data_maps = TEST_mixed_data_maps[:, 0, :, :]
+                train_mixed_data_maps = train_mixed_data_maps[:, 0, :, :]
+                train_encoder_data_maps = train_encoder_data_maps[:, 0, :, :]
+                TEST_encoder_data_maps = TEST_encoder_data_maps[:, 0, :, :]
+            
+
+                # reshape to (num_samples, 1, num_features, signal_length)
+                TEST_mixed_data_maps = torch.reshape(TEST_mixed_data_maps, (TEST_mixed_data_maps.shape[0], 1, TEST_mixed_data_maps.shape[1], TEST_mixed_data_maps.shape[2]))
+                train_mixed_data_maps = torch.reshape(train_mixed_data_maps, (train_mixed_data_maps.shape[0], 1, train_mixed_data_maps.shape[1], train_mixed_data_maps.shape[2]))
+                train_encoder_data_maps = torch.reshape(train_encoder_data_maps, (train_encoder_data_maps.shape[0], 1, train_encoder_data_maps.shape[1], train_encoder_data_maps.shape[2]))
+                TEST_encoder_data_maps = torch.reshape(TEST_encoder_data_maps, (TEST_encoder_data_maps.shape[0], 1, TEST_encoder_data_maps.shape[1], TEST_encoder_data_maps.shape[2]))
 
     elif data_type == 'HiRID':
         window_size = learn_encoder_hyper_params['window_size']
         length_of_hour = int((60*60)/300) # 60 seconds * 60 / 300 (which is num seconds in 5 min)
-        pos_sample_name = 'mortality'
+        
         path = '../DONTCOMMITdata/hirid_numpy'
         signal_list = ['vm1', 'vm3', 'vm4', 'vm5', 'vm13', 'vm20', 'vm28', 'vm62', 'vm136', 'vm146', 'vm172', 'vm174', 'vm176', 'pm41', 'pm42', 'pm43', 'pm44', 'pm87']
         sliding_gap = 1
+        
+        pos_sample_name = 'mortality'
         pre_positive_window = int((24*60*60)/300) # 24 hrs
         num_pre_positive_encodings = int(pre_positive_window/window_size)
+        
 
         if DEBUG: # Smaller version of dataset to debug code with. Not representitive of the whole cohort, and test data is same as train/valid
             print("Debug turned on!")
             TEST_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'TEST_data_maps.npy'))).float()[0:100]
-            TEST_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'TEST_labels.npy'))).float()[0:100]
+            TEST_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'TEST_mortality_labels.npy'))).float()[0:100]
 
             train_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_data_maps.npy'))).float()[0:150]
-            train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_labels.npy'))).float()[0:150]
+            train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_mortality_labels.npy'))).float()[0:150]
 
             # set encoder cv and classifier cv to 1 so things run faster
             learn_encoder_hyper_params['n_cross_val_encoder'] = 1
@@ -976,17 +1059,77 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
             # data_maps arrays are of shape (num_samples, 2, 18, 1152). 4 days of data per sample
             
             
-            TEST_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'TEST_data_maps.npy'))).float()
-            TEST_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'TEST_labels.npy'))).float()
+            TEST_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'TEST_mortality_data_maps.npy'))).float()
+            TEST_mixed_mortality_labels = torch.from_numpy(np.load(os.path.join(path, 'TEST_mortality_labels.npy'))).float()
+            TEST_mixed_labels = TEST_mixed_mortality_labels
+            TEST_PIDs = torch.from_numpy(np.load(os.path.join(path, 'TEST_first_24_hrs_PIDs.npy'))).float()
+            TEST_Apache_Groups = torch.from_numpy(np.load(os.path.join(path, 'TEST_Apache_Groups.npy'))).float()
 
-            train_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_data_maps.npy'))).float()
-            train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_labels.npy'))).float()
-    
-    
+
+            train_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_mortality_data_maps.npy'))).float()
+            train_mixed_mortality_labels = torch.from_numpy(np.load(os.path.join(path, 'train_mortality_labels.npy'))).float()
+            train_mixed_labels = train_mixed_mortality_labels
+            train_PIDs = torch.from_numpy(np.load(os.path.join(path, 'train_first_24_hrs_PIDs.npy'))).float()
+            train_Apache_Groups = torch.from_numpy(np.load(os.path.join(path, 'train_Apache_Groups.npy'))).float()
+
+            # Apache groups are either apache 2 or apache 4 codes. We consolodate into a single set of codes
+            #  according to mapping here: https://docs.google.com/spreadsheets/d/16IYawLlASYbCekQe2_kUKxQZrwjIe4ibkPt7UU1u5pE/edit?usp=sharing
+
+            # Used for training encoder
+            train_encoder_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_encoder_data_maps.npy'))).float()
+            TEST_encoder_data_maps = torch.from_numpy(np.load(os.path.join(path, 'TEST_encoder_data_maps.npy'))).float()
+            
+            if learn_encoder_hyper_params['ADF']:
+                print('USING ADF')
+                TEST_mixed_data_maps = TEST_mixed_data_maps[:, 0, :, :]
+                train_mixed_data_maps = train_mixed_data_maps[:, 0, :, :]
+                train_encoder_data_maps = train_encoder_data_maps[:, 0, :, :]
+                TEST_encoder_data_maps = TEST_encoder_data_maps[:, 0, :, :]
+            
+
+                # reshape to (num_samples, 1, num_features, signal_length)
+                TEST_mixed_data_maps = torch.reshape(TEST_mixed_data_maps, (TEST_mixed_data_maps.shape[0], 1, TEST_mixed_data_maps.shape[1], TEST_mixed_data_maps.shape[2]))
+                train_mixed_data_maps = torch.reshape(train_mixed_data_maps, (train_mixed_data_maps.shape[0], 1, train_mixed_data_maps.shape[1], train_mixed_data_maps.shape[2]))
+                train_encoder_data_maps = torch.reshape(train_encoder_data_maps, (train_encoder_data_maps.shape[0], 1, train_encoder_data_maps.shape[1], train_encoder_data_maps.shape[2]))
+                TEST_encoder_data_maps = torch.reshape(TEST_encoder_data_maps, (TEST_encoder_data_maps.shape[0], 1, TEST_encoder_data_maps.shape[1], TEST_encoder_data_maps.shape[2]))
+
+
+            apache_codes = [98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 190, 191, 192, 193, 197, 194, 195, 196, 198, 199, 201, 200, 202, 203, 204, 205, 206]
+            mappings = [0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19]
+            apache_names = ['Cardiovascular', 'Pulmonary', 'Gastrointestinal', 'Neurological', 'Sepsis', 'Urogenital', 'Trauma', 'Metabolic/Endocrinology', 'Hematology', 'Other', 'Surgical Cardiovascular', 'Surgical Respiratory', 'Surgical Gastrointestinal', 'Surgical Neurological', 'Surgical Trauma', 'Surgical Urogenital', 'Surgical Gynecology', 'Surgical Orthopedics', 'Surgical others', 'Intoxication']
+            for i in range(len(apache_codes)):
+                train_Apache_Groups[torch.where(train_Apache_Groups == apache_codes[i])] = mappings[i]
+                TEST_Apache_Groups[torch.where(TEST_Apache_Groups == apache_codes[i])] = mappings[i]
+            
+            # Now for any patients that did not have any code, we'll categorize that as 'other'
+            train_Apache_Groups[torch.where(train_Apache_Groups == -1)] = 9
+            TEST_Apache_Groups[torch.where(TEST_Apache_Groups == -1)] = 9
+
+            assert -1 not in train_Apache_Groups
+            assert -1 not in TEST_Apache_Groups
+
+            (unique, counts) = np.unique(train_Apache_Groups, return_counts=True)
+            print('Distribution of train Apache states:')
+            for i in range(len(unique)):
+                print(unique[i], ': ', counts[i])
+            print()
+            (unique, counts) = np.unique(TEST_Apache_Groups, return_counts=True)
+            print('Distribution of TEST Apache states:')
+            for i in range(len(unique)):
+                print(unique[i], ': ', counts[i])
+            
+
     if train_encoder:
-        learn_encoder(data_maps=train_mixed_data_maps, labels=train_mixed_labels, 
+        print('Entering learn_encoder')
+        print("Current Time ", datetime.now())
+        learn_encoder(data_maps=torch.vstack([train_encoder_data_maps, TEST_encoder_data_maps]), 
         encoder_type=encoder_type, encoder_hyper_params=encoder_hyper_params, 
         pretrain_hyper_params=pretrain_hyper_params, **learn_encoder_hyper_params)
+
+        print('Finished training encoder')
+        print("Current Time ", datetime.now())
+    del train_encoder_data_maps
+    del TEST_encoder_data_maps # Don't need these after training encoder
 
     classifier_validation_aurocs = []
     classifier_validation_auprcs = []
@@ -995,8 +1138,8 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
 
     for encoder_cv in range(learn_encoder_hyper_params['n_cross_val_encoder']):
         for classification_cv in range(classification_hyper_params['n_cross_val_classification']):
-            print('SETTING SEED TO 111*CV + 2, instead of 123*CV')
-            seed_val = 111*encoder_cv+2
+            print('SETTING SEED TO 111*CV + 2*(classification_cv+1)')
+            seed_val = 111*encoder_cv+2*(classification_cv+1)
             random.seed(seed_val)
             print("Seed set to: ", seed_val)
             if os.path.exists('../ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, encoder_cv)): # i.e. a checkpoint *has* been saved for this config
@@ -1007,6 +1150,8 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                 checkpoint = torch.load('../ckpt/%s/%s_checkpoint_%d.tar'%(data_type, UNIQUE_NAME, encoder_cv))
                 encoder = get_encoder(encoder_type, encoder_hyper_params).to(device)
                 encoder.load_state_dict(checkpoint['encoder_state_dict'])
+                encoder.pruning_mask = checkpoint['pruning_mask']
+                encoder.pruned_encoding_size = int(torch.sum(encoder.pruning_mask))
                 encoder.eval()
                 
                 print('Original shape of train data: ')
@@ -1017,12 +1162,11 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                 print("First 15 inds: ", inds[:15])
                 train_mixed_data_maps_cv = train_mixed_data_maps[inds]
                 train_mixed_labels_cv = train_mixed_labels[inds]
-                print("Size of train + valid data: ", train_mixed_data_maps_cv.shape)
-                print("Size of train + valid labels: ", train_mixed_labels_cv.shape)
 
                 n_valid = int(0.2*len(train_mixed_data_maps_cv))
                 validation_mixed_data_maps_cv = train_mixed_data_maps_cv[0:n_valid]
                 validation_mixed_labels_cv = train_mixed_labels_cv[0:n_valid]
+                
                 print("Size of valid data: ", validation_mixed_data_maps_cv.shape)
                 print("Size of valid labels: ", validation_mixed_labels_cv.shape)
                 print("num positive valid samples: ", sum([1 in validation_mixed_labels_cv[ind] for ind in range(len(validation_mixed_labels_cv))]))
@@ -1037,16 +1181,17 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                 print('Size of TEST labels: ', TEST_mixed_labels.shape)
                 print("Num positive TEST samples: ", sum([1 in TEST_mixed_labels[ind] for ind in range(len(TEST_mixed_labels))]))
                 
-                print('Levels of missingness, for Train, Validation, and TEST')
+                if not learn_encoder_hyper_params['ADF']:
+                    print('Levels of missingness, for Train, Validation, and TEST')
                 
-                print(len(torch.where(train_mixed_data_maps_cv[:, 1, :, :] == 0)[0])/ \
-                (train_mixed_data_maps_cv.shape[0]*train_mixed_data_maps_cv.shape[2]*train_mixed_data_maps_cv.shape[3]))
+                    print(len(torch.where(train_mixed_data_maps_cv[:, 1, :, :] == 0)[0])/ \
+                    (train_mixed_data_maps_cv.shape[0]*train_mixed_data_maps_cv.shape[2]*train_mixed_data_maps_cv.shape[3]))
 
-                print(len(torch.where(validation_mixed_data_maps_cv[:, 1, :, :] == 0)[0])/ \
-                (validation_mixed_data_maps_cv.shape[0]*validation_mixed_data_maps_cv.shape[2]*validation_mixed_data_maps_cv.shape[3]))
+                    print(len(torch.where(validation_mixed_data_maps_cv[:, 1, :, :] == 0)[0])/ \
+                    (validation_mixed_data_maps_cv.shape[0]*validation_mixed_data_maps_cv.shape[2]*validation_mixed_data_maps_cv.shape[3]))
 
-                print(len(torch.where(TEST_mixed_data_maps[:, 1, :, :] == 0)[0])/ \
-                (TEST_mixed_data_maps.shape[0]*TEST_mixed_data_maps.shape[2]*TEST_mixed_data_maps.shape[3]))
+                    print(len(torch.where(TEST_mixed_data_maps[:, 1, :, :] == 0)[0])/ \
+                    (TEST_mixed_data_maps.shape[0]*TEST_mixed_data_maps.shape[2]*TEST_mixed_data_maps.shape[3]))
                 
                 print('Mean of signal 1 for train:')
                 print(torch.mean(train_mixed_data_maps_cv[:, 0, 0, :]))
@@ -1072,19 +1217,21 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                 print(torch.mean(TEST_mixed_data_maps[:, 0, 2, :]))
 
                 
-                
-                
-                if os.path.exists('../ckpt/%s/%s_encoder_checkpoint_%d_Classifier_checkpoint_%d.tar'%(data_type, UNIQUE_ID, encoder_cv, classification_cv)):
+            
+                if os.path.exists('../ckpt/%s/%s_encoder_checkpoint_%d_%sClassifier_checkpoint_%d.tar'%(data_type, UNIQUE_ID, encoder_cv, 'circulatory' if circulatory_failure else '', classification_cv)):
                     checkpoint = torch.load('../ckpt/%s/%s_encoder_checkpoint_%d_Classifier_checkpoint_%d.tar'%(data_type, UNIQUE_ID, encoder_cv, classification_cv))
-                    rnn = RnnPredictor(encoding_size=encoder_hyper_params['encoding_size'], hidden_size=32).to(device)
-                    # 32 is the arbitrary hidden size chosen for the RNN
-                    classifier = LinearClassifier(input_size=32).to(device)
+                    if data_type == 'HiRID' or data_type == 'ICU':
+                        classifier = RnnPredictor(encoding_size=encoder.pruned_encoding_size, hidden_size=8).to(device)
                     
-                    rnn.load_state_dict(checkpoint['rnn_state_dict'])
+                    elif data_type == None:
+                        classifier = LinearClassifier(input_size=encoder.pruned_encoding_size).to(device)
+                    
+
                     classifier.load_state_dict(checkpoint['classifier_state_dict'])
                     print("Checkpoint loaded for classifier! Encoder cv %d, classifier cv %d"%(encoder_cv, classification_cv))
+                
                 else:
-                    # Modifying training data to be less imbalanced. We'll make sure there's roughly 20x more negative encodings to be classified than positive
+                    
                     train_pos_sample_inds = [ind for ind in range(len(train_mixed_labels_cv)) if 1 in train_mixed_labels_cv[ind]]
                     train_neg_sample_inds = [ind for ind in range(len(train_mixed_labels_cv)) if 1 not in train_mixed_labels_cv[ind]]
                     
@@ -1092,6 +1239,7 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
 
                     print("Turned off multiplier enforcement for train data")
                     '''
+                    # Modifying training data to be less imbalanced. We'll make sure there's roughly 20x more negative encodings to be classified than positive
                     if data_type == 'ICU':
                         # Now we'll add the number of negative samples necessary to maintain a 20 times imbalance in encodings that get plotted
                                                 # for the positive indices we haven't set aside to plot, compute 20 times the number of encodings we'll get from them
@@ -1103,15 +1251,10 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                     train_mixed_labels_cv = train_mixed_labels_cv[inds_for_classification]
                     '''
                     print("TRAINING LINEAR CLASSIFIER")
-                    classifier_train_labels = torch.Tensor([1 in label for label in train_mixed_labels_cv]) # Sets labels for positive samples to 1
-                    classifier_validation_labels = torch.Tensor([1 in label for label in validation_mixed_labels_cv]) # Sets labels for positive samples to 1
-                    classifier_TEST_labels = torch.Tensor([1 in label for label in TEST_mixed_labels]) # Sets labels for positive samples to 1
-                    
-                    
-                    rnn, classifier, valid_auroc, valid_auprc, TEST_auroc, TEST_auprc = train_linear_classifier(X_train=train_mixed_data_maps_cv, y_train=classifier_train_labels, 
-                    X_validation=validation_mixed_data_maps_cv, y_validation=classifier_validation_labels, 
-                    X_TEST=TEST_mixed_data_maps, y_TEST=classifier_TEST_labels,
-                    encoding_size=encoder.encoding_size, batch_size=20, num_pre_positive_encodings=num_pre_positive_encodings, encoder=encoder, return_models=True, return_scores=True, pos_sample_name=pos_sample_name, 
+                    classifier, valid_auroc, valid_auprc, TEST_auroc, TEST_auprc = train_linear_classifier(X_train=train_mixed_data_maps_cv, y_train=train_mixed_labels_cv, 
+                    X_validation=validation_mixed_data_maps_cv, y_validation=validation_mixed_labels_cv, 
+                    X_TEST=TEST_mixed_data_maps, y_TEST=TEST_mixed_labels,
+                    encoding_size=encoder.pruned_encoding_size, batch_size=20, num_pre_positive_encodings=num_pre_positive_encodings, encoder=encoder, window_size=encoder_hyper_params['window_size'], return_models=True, return_scores=True, pos_sample_name=pos_sample_name, 
                     data_type=data_type, classification_cv=classification_cv, encoder_cv=encoder_cv)
 
                     classifier_validation_aurocs.append(valid_auroc)
@@ -1138,7 +1281,6 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
 
     if plot_embeddings:
         encoder.eval()
-        rnn.eval()
         classifier.eval()
         train_pos_sample_inds = [ind for ind in range(len(train_mixed_labels)) if 1 in train_mixed_labels[ind]]
         train_neg_sample_inds = [ind for ind in range(len(train_mixed_labels)) if 1 not in train_mixed_labels[ind]]
@@ -1158,11 +1300,11 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
         
         indexes_for_clustering = indexes_chosen_to_plot.copy()
         if data_type == 'HiRID':
-            # Now we'll add the remaining positive samples from the train set
-            indexes_for_clustering.extend(train_pos_sample_inds[num_positive_plotted:min(num_positive_plotted+50, len(train_pos_sample_inds))])
+            # Now we'll add the more positive samples from the train set
+            indexes_for_clustering.extend(train_pos_sample_inds[num_positive_plotted:min(num_positive_plotted+10, len(train_pos_sample_inds))])
             # Now we'll add the number of negative samples necessary to maintain a 20 times imbalance in encodings that get plotted
                                             # for the positive indices we haven't set aside to plot, compute 20 times the number of encodings we'll get from them
-            num_negatives_to_add = int((20*(pre_positive_window/window_size)*(min(num_positive_plotted+50, len(train_pos_sample_inds)) - num_positive_plotted))/ \
+            num_negatives_to_add = int((20*(pre_positive_window/window_size)*(min(num_positive_plotted+10, len(train_pos_sample_inds)) - num_positive_plotted))/ \
                                         (train_mixed_data_maps.shape[-1]/window_size)) # then divide by seq_len/window_size, i.e. the number of encodings we get from each negative sample.
         elif data_type == 'ICU':
             # Now we'll add the remaining positive samples from the train set
@@ -1275,6 +1417,73 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
         # Now we'll cluster just the positive samples
         dim_reduction_positive_clusters(positive_encodings=masked_pos_clustering_encodings, positive_cluster_labels=positive_clustering_model.labels_, data_type=data_type, unique_name=UNIQUE_NAME, unique_id=UNIQUE_ID)
 
+        if data_type == 'HiRID' and not circulatory_failure:
+            print("Plotting apache sub groups")
+            # Only plot embeddings for groups where there are >= 10 patients
+            apache_groups_to_plot = [mapping for mapping in mappings if len(torch.where(TEST_Apache_Groups==mapping)[0]) >= 10]
+            apache_group_encodings = []
+            labels = []
+            for group in apache_groups_to_plot:
+                inds = torch.where(TEST_Apache_Groups==group)[0][0:10] # Get first 10 indices
+                
+                for ind in inds:
+                    sample = TEST_mixed_data_maps[ind].unsqueeze(0)
+                    encodings, encoding_mask = encoder.forward_seq(sample, return_encoding_mask=True)
+                    encodings = encodings.squeeze() # of shape (num_encodings, encoding_size)
+                    encoding_mask = encoding_mask.squeeze() # of shape (num_encodings,)
+                    for i in range(len(encodings)):
+                        if encoding_mask[i] != -1:
+                            apache_group_encodings.append(encodings[i])
+                            labels.append(TEST_Apache_Groups[ind])
+            
+            labels = torch.Tensor(labels).cpu().numpy()
+            apache_group_encodings = torch.vstack(apache_group_encodings).cpu().detach().numpy()
+            dim_reduction(encodings=apache_group_encodings, labels=labels, save_path='../DONTCOMMITplots/%s/%s/'%(data_type, unique_id), plot_name='%s_Apache_Group_Encodings.pdf'%unique_name, label_names=apache_names)
+
+            print('Plotting Alluvial Plot')
+            
+            apache_for_alluvial = train_Apache_Groups[torch.cat([pos_inds, neg_inds])]
+            (unique, counts) = np.unique(apache_for_alluvial, return_counts=True)
+            print('Distribution of Apache states for alluvial plot:')
+            for i in range(len(unique)):
+                print(unique[i], ': ', counts[i])
+
+            alluvial_dict = {}
+            print('pos_encoding_mask shape: ', pos_encoding_mask.shape)
+            print('neg_encoding_mask shape: ', neg_encoding_mask.shape)
+            encoding_mask = torch.vstack([pos_encoding_mask, neg_encoding_mask])
+            for cluster_name in range(clustering_model.n_clusters()):
+                alluvial_dict['Cluster %d'%cluster_name] = {}
+
+                alluvial_dict[cluster_name] = None
+                num_to_skip = 0
+                for i in range(len(apache_for_alluvial)):
+                    num_valid = len(torch.where(encoding_mask[i] != -1)[0])
+                    count = len(torch.where(clustering_model.labels_[num_to_skip: num_to_skip + num_valid]==cluster_name)[0])
+                    apache_group = apache_for_alluvial[i]
+                    apache_name = apache_names[apache_group]
+                    if apache_name not in alluvial_dict[cluster_name]:
+                        alluvial_dict[cluster_name][apache_name] = count
+                    else:
+                        alluvial_dict[cluster_name][apache_name] += count
+                    
+                    num_to_skip += num_valid
+            
+            print('alluvial_dict: ')
+            print(alluvial_dict)
+            ax = alluvial.plot(alluvial_dict)
+            fig = ax.get_figure()
+            ax.set_title('Cluster vs Apache Group Distribution', fontsize=14)
+            fig.set_size_inches(10,5)
+            plt.savefig('../DONTCOMMITplots/%s/%s/alluvial_cluster_plot.pdf'%(data_type, UNIQUE_ID))
+
+
+            
+
+
+            
+
+
         print("Sliding Window: ", sliding_gap)
         
         normalization_specs = np.load(os.path.join(path, 'normalization_specs.npy'))
@@ -1285,6 +1494,7 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
         
         for plot_index, ind in enumerate(indexes_chosen_to_plot):
             if plot_index < num_positive_plotted:
+                # encodings_for_rnn is of shape (1, num_sliding_windows, encoding_size)
                 encodings_for_rnn = encoder.forward_seq(train_mixed_data_maps[ind], sliding_gap=sliding_gap)
                 encodings = encoder.forward_seq(train_mixed_data_maps[ind]).squeeze()
                 
@@ -1318,12 +1528,15 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
                 
                 
 
-
-
             # encoding_batch is of size (1, seq_len, encoding_size) 
-            output, _ = rnn(encodings_for_rnn) # output contains hidden state for each time step. Shape is (batch_size, seq_len, hidden_size). batch_size=1
+            if data_type == 'HiRID':
+                output = classifier(encodings_for_rnn, return_full_seq=True) # output contains hidden state for each time step. Shape is (1, seq_len)
+            else:
+                encodings_for_rnn = encodings_for_rnn.squeeze()
+                output = classifier(encodings_for_rnn)
             output = output.squeeze() # now of shape (seq_len, hidden_size). Can be thought of as seq_len hidden states, each of size hidden_size
-            risk_scores_over_time = torch.nn.Sigmoid()(classifier(output).to('cpu')).detach() # Apply sigmoid because the classifier doesn't apply this because we use BCEWITHLOGITSLOSS in train_linear_classifier
+            
+            risk_scores_over_time = torch.nn.Sigmoid()(output.to('cpu')).detach() # Apply sigmoid because the classifier doesn't apply this because we use BCEWITHLOGITSLOSS in train_linear_classifier
 
 
             encodings = encodings.to('cpu')
@@ -1368,14 +1581,11 @@ def main(train_encoder, data_type, encoder_type, encoder_hyper_params, learn_enc
 
         print("Done plotting embeddings.")
         
-    
-
-print("Finished running on ", datetime.now())
+    print("Finished running on ", datetime.now())
     
 if __name__ == '__main__':
     print("STARTED RUNNING")
     print(device)
-    # Going to update RNN
     
     print("Started running on ", datetime.now())
     parser = argparse.ArgumentParser(description='Run TNC')
@@ -1389,10 +1599,12 @@ if __name__ == '__main__':
     
     parser.add_argument('--plot_embeddings', action='store_true')
     parser.add_argument('--DEBUG', action='store_true')
+    parser.add_argument('--circulatory_failure', action='store_true') # Will classify circulatory failure for HiRID data.
     args = parser.parse_args()
     
     STR_ID = args.ID
     DEBUG = args.DEBUG
+    circulatory_failure = args.circulatory_failure
     print("DEBUG: ", DEBUG)
     print("STR_ID: ", STR_ID)
 
@@ -1434,7 +1646,7 @@ if __name__ == '__main__':
         print("CHECKPOINT PASSED IN")
         checkpoint = torch.load(args.checkpoint_file)
         print('checkpoint successfully loaded!')
-        main(args.train, checkpoint['data_type'], checkpoint['encoder_type'], checkpoint['encoder_hyper_params'], checkpoint['learn_encoder_hyper_params'], checkpoint['classification_hyper_params'], args.cont, checkpoint['pretrain_hyper_params'], args.plot_embeddings, checkpoint['unique_id'], checkpoint['unique_name'], DEBUG=DEBUG)
+        main(args.train, checkpoint['data_type'], checkpoint['encoder_type'], checkpoint['encoder_hyper_params'], checkpoint['learn_encoder_hyper_params'], checkpoint['classification_hyper_params'], args.cont, checkpoint['pretrain_hyper_params'], args.plot_embeddings, checkpoint['unique_id'], checkpoint['unique_name'], DEBUG=DEBUG, circulatory_failure=circulatory_failure)
 
 
 

@@ -1300,31 +1300,33 @@ class LinearClassifier(nn.Module):
 
 
 class RnnPredictor(torch.nn.Module):
-    def __init__(self, encoding_size, hidden_size):
+    def __init__(self, encoding_size, hidden_size, n_classes=1):
         super(RnnPredictor, self).__init__()
         self.encoding_size = encoding_size
         self.hidden_size = hidden_size
         self.num_layers = 1
         self.rnn = torch.nn.LSTM(input_size=encoding_size,  hidden_size=hidden_size, num_layers=self.num_layers, batch_first=True)
-
-    def forward(self, x, variable_len=False, x_lengths=None):
-        if variable_len:
-            # x is of shape (num_samples, padded_seq_len, num_features)
-            # Now to pack the data:
-
-            x = torch.nn.utils.rnn.pack_padded_sequence(x, x_lengths, batch_first=True)
-            output, (h_n, _) = self.rnn(x)
-            
-            # Now to unpack again
-            output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first=True)
-
-            # Then how do i modify the loss like the article did..?
-            return output, h_n
-
+        if n_classes == 1:
+            self.linear = torch.nn.Linear(hidden_size, n_classes)
         else:
-            output, (h_n, _) = self.rnn(x)
-            return output, h_n
+            self.linear = torch.nn.Sequential(torch.nn.Linear(hidden_size, 32), 
+                                              torch.nn.Linear(32, n_classes))
 
+    def forward(self, x, return_full_seq=False):
+        # x is of shape (num_samples, seq_len, num_features)
+        output, (h_n, _) = self.rnn(x)
+        preds = []
+        for hidden_states in output:
+            preds.append(self.linear(hidden_states).squeeze()) # of shape (seq_len, num_classes)
+        
+        # of shape (num_samples, seq_len, n_classes) or (num_samples, seq_len) if n_classes ==1. The ijk'th element is the prediction of class k for sample i at time j
+        preds = torch.stack(preds) # Note this must be passed through sigmoid after output
+        if return_full_seq:
+            return preds
+        else:
+            return preds[:, -1] # of shape (num_samples, n_classes)
+
+        
 
 
 
@@ -1593,10 +1595,11 @@ class CausalCNNEncoder(torch.nn.Module):
         ).to(device)
 
         self.window_size = window_size
-
+        self.pruning_mask = torch.ones(self.encoding_size).bool() # This will be used to prune encoding dimensions that 
+        self.pruned_encoding_size = int(torch.sum(self.pruning_mask))
         
 
-    def forward(self, x):
+    def forward(self, x, return_pruned=True):
         x = x.to(self.device)
         if len(tuple(x.shape)) == 4 and x.shape[1] == 2: # Meaning maps are included
             x = torch.reshape(x, (x.shape[0], x.shape[2]*2, x.shape[3]))
@@ -1604,15 +1607,23 @@ class CausalCNNEncoder(torch.nn.Module):
         elif len(tuple(x.shape)) == 3 and x.shape[0] == 2: # Maps are included
             x = torch.unsqueeze(x, 0) # Make it a batch of size 1, shape is (1, 2, num_features, seq_len)
             x = torch.reshape(x, (x.shape[0], x.shape[2]*2, x.shape[3]))
+        
+        elif len(tuple(x.shape)) == 3 and x.shape[0] != 2: # Maps aren't include. x is of shape (bs, num_featuers, seq_len)
+            pass
+        
+        
 
-        return self.network(x)
+        if return_pruned:
+            return self.network(x)[:, self.pruning_mask]
+        else:
+            return self.network(x)
 
-    def forward_seq(self, x, return_encoding_mask=False, sliding_gap=None):
+    def forward_seq(self, x, return_encoding_mask=False, sliding_gap=None, return_pruned=True):
         '''Takes a tensor of shape (num_samples, 2, num_features, seq_len) of timeseries data.
         
         Returns a tensor of shape (num_samples, seq_len/winow_size, encoding_size)'''
         assert x.shape[-1] % self.window_size == 0
-        if len(tuple(x.shape)) == 3:
+        if len(tuple(x.shape)) == 3 and x.shape[1] == 2: # If a 3D tensor with maps is passed in, add a new dimension of size 1 to make it a batch of size 1
             x = torch.unsqueeze(x, 0)
 
         if sliding_gap:
@@ -1626,25 +1637,41 @@ class CausalCNNEncoder(torch.nn.Module):
             x = torch.index_select(input=x, dim=3, index=inds)
 
         if return_encoding_mask:
-            encoding_mask  = torch.sum(x[:, 1, :, :]==0, dim=1) # Of shape (num_samples, seq_len). the ij'th element is = num_features if that time step was fully imputed, 0 otherwise
-            encoding_mask = encoding_mask[:, self.window_size-1::self.window_size] # Of shape (num_samples, seq_len/self.window_size). On the second dim, only keeps every self.window_size'th element
-            encoding_mask[encoding_mask == x.shape[2]] = -1 # Now the ij'th element is -1 if the j'th encoding from sample i was derived from fully imputed data. 0 otherwise
+            if x.shape[1] == 2:
+                encoding_mask  = torch.sum(x[:, 1, :, :]==0, dim=1) # Of shape (num_samples, seq_len). the ij'th element is = num_features if that time step was fully imputed, <num_features otherwise
+                encoding_mask[torch.where(encoding_mask < x.shape[2])] = 0 # Of shape (num_samples, seq_len). the ij'th element is = num_features if that time step was fully imputed, 0 otherwise
+                encoding_mask = encoding_mask[:, self.window_size-1::self.window_size] # Of shape (num_samples, seq_len/self.window_size). On the second dim, only keeps every self.window_size'th element
+                encoding_mask[encoding_mask == x.shape[2]] = -1 # Now the ij'th element is -1 if the j'th encoding from sample i was derived from fully imputed data. 0 otherwise
+            else:
+                encoding_mask = torch.ones(x.shape[0], x.shape[-1]//self.window_size)
         
-        
-        num_samples, two, num_features, seq_len = x.shape
-        #print('entering forward_seq!')
-        #print('num_samples, two, num_features, seq_len', num_samples, two, num_features, seq_len)
-        x = torch.reshape(x, (num_samples, num_features*2, seq_len)) # now x is of shape (num_samples, 2*num_features, seq_len)
-        #print(x.shape, '==', num_samples, 2*num_features, seq_len)
-        x = x.permute(1, 0, 2)
-        x = x.reshape(2*num_features, -1) # Now of shape (2*num_features, num_samples*seq_len)
-        #print(x.shape, '==', 2*num_features, num_samples*seq_len)
-        x = torch.stack(torch.split(x, self.window_size, dim=1)) # Now of shape (num_samples*(seq_len/window_size), 2*num_features, window_size)
-        #print(x.shape, '==', num_samples*(seq_len/self.window_size), 2*num_features, self.window_size)
+        if len(tuple(x.shape)) == 4:
+            num_samples, num_channels, num_features, seq_len = x.shape
+            #print('entering forward_seq!')
+            #print('num_samples, two, num_features, seq_len', num_samples, two, num_features, seq_len)
+            x = torch.reshape(x, (num_samples, num_features*num_channels, seq_len)) # now x is of shape (num_samples, num_channels*num_features, seq_len)
+            #print(x.shape, '==', num_samples, 2*num_features, seq_len)
+            x = x.permute(1, 0, 2)
+            x = x.reshape(num_channels*num_features, -1) # Now of shape (2*num_features, num_samples*seq_len)
+            #print(x.shape, '==', 2*num_features, num_samples*seq_len)
+            x = torch.stack(torch.split(x, self.window_size, dim=1)) # Now of shape (num_samples*(seq_len/window_size), num_channels*num_features, window_size)
+            #print(x.shape, '==', num_samples*(seq_len/self.window_size), num_channels*num_features, self.window_size)
 
-        encodings = self.forward(x) # encodings is of shape (num_samples*(seq_len/window_size), encoding_size)
-        #print(encodings.shape, '==', num_samples*(seq_len/self.window_size), self.encoding_size)
-        encodings = encodings.reshape(num_samples, int(seq_len/self.window_size), self.encoding_size)
+            encodings = self.forward(x, return_pruned=return_pruned) # encodings is of shape (num_samples*(seq_len/window_size), encoding_size)
+            #print(encodings.shape, '==', num_samples*(seq_len/self.window_size), self.pruned_encoding_size)
+            encodings = encodings.reshape(num_samples, int(seq_len/self.window_size), self.pruned_encoding_size)
+        
+        elif len(tuple(x.shape)) == 3:
+            num_samples, num_features, seq_len = x.shape
+            x = x.permute(1, 0, 2)
+            x = x.reshape(num_features, -1) # Now of shape (num_features, num_samples*seq_len)
+            #print(x.shape, '==', 2*num_features, num_samples*seq_len)
+            x = torch.stack(torch.split(x, self.window_size, dim=1)) # Now of shape (num_samples*(seq_len/window_size), num_features, window_size)
+            
+
+            encodings = self.forward(x, return_pruned=return_pruned) # encodings is of shape (num_samples*(seq_len/window_size), encoding_size)
+            #print(encodings.shape, '==', num_samples*(seq_len/self.window_size), self.pruned_encoding_size)
+            encodings = encodings.reshape(num_samples, int(seq_len/self.window_size), self.pruned_encoding_size)
         
         if return_encoding_mask:
             return encodings, encoding_mask

@@ -9,97 +9,10 @@ import argparse
 
 from tnc.models import Chomp1d, SqueezeChannels, CausalConvolutionBlock, CausalCNN
 from tnc.utils import plot_distribution, model_distribution
+from baselines.triplet_loss import CausalCNNEncoder, train_linear_classifier, linear_classifier_epoch_run 
+#from tnc.tnc import linear_classifier_epoch_run
 #from tnc.evaluations import ClassificationPerformanceExperiment, WFClassificationExperiment
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-class CausalCNNEncoder(torch.nn.Module):
-    """
-    Encoder of a time series using a causal CNN: the computed representation is
-    the output of a fully connected layer applied to the output of an adaptive
-    max pooling layer applied on top of the causal CNN, which reduces the
-    length of the time series to a fixed size.
-    Takes as input a three-dimensional tensor (`B`, `C`, `L`) where `B` is the
-    batch size, `C` is the number of input channels, and `L` is the length of
-    the input. Outputs a three-dimensional tensor (`B`, `C`).
-    @param in_channels Number of input channels.
-    @param channels Number of channels manipulated in the causal CNN.
-    @param depth Depth of the causal CNN.
-    @param reduced_size Fixed length to which the output time series of the
-           causal CNN is reduced.
-    @param encoding_size Number of output channels.
-    @param kernel_size Kernel size of the applied non-residual convolutions.
-    @param window_size windows of data to encode at a time. It should be ensured that this evenly
-            divides into the length of the time series passed in. E.g. window_size is 120, and
-            x.shape[-1] (where x is passed into forward) is 120*c for some natural number c
-    """
-    def __init__(self, in_channels, channels, depth, reduced_size,
-                 encoding_size, kernel_size, device, window_size):
-        super(CausalCNNEncoder, self).__init__()
-        self.encoding_size = encoding_size
-        self.device = device
-        causal_cnn = CausalCNN(
-            in_channels, channels, depth, reduced_size, kernel_size
-        )
-        reduce_size = torch.nn.AdaptiveMaxPool1d(1)
-        squeeze = SqueezeChannels()  # Squeezes the third dimension (time)
-        linear = torch.nn.Linear(reduced_size, encoding_size)
-        self.network = torch.nn.Sequential(
-            causal_cnn, reduce_size, squeeze, linear
-        ).to(device)
-
-        self.window_size = window_size
-
-
-
-    def forward(self, x):
-        x = x.to(self.device)
-
-
-        if len(tuple(x.shape)) == 2:
-            x = torch.unsqueeze(x, 0) # Make it a batch of size 1, shape is (1, num_features, seq_len)
-
-
-        return self.network(x)
-
-    def forward_seq(self, x, sliding_gap=None):
-        '''Takes a tensor of shape (num_samples, num_features, seq_len) of timeseries data.
-        
-        Returns a tensor of shape (num_samples, seq_len/winow_size, encoding_size)'''
-
-        assert x.shape[-1] % self.window_size == 0
-        if len(tuple(x.shape)) == 2:
-            x = torch.unsqueeze(x, 0)
-
-        if sliding_gap:
-            # This is a tensor of indices. If the data is of shape (num_samples, 2, num_features, 10), and window_size = 4 and sliding_gap=2, then inds is an array
-            # of [0, 1, 2, 3, 2, 3, 4, 5, 4, 5, 6, 7, 6, 7, 8, 9]
-            inds = torch.cat([torch.arange(ind, ind+self.window_size) for ind in range(0, x.shape[-1]-self.window_size+1, sliding_gap)])
-
-            # Now for each sample we have the window_size windows concatenated for each sliding gap on the last axis.
-            # So if window_size is 120 and sliding_gap is 20, then for each sample, the time dimension will go 
-            # [0, 1, 2, ..., 119, 20, 21, ..., 139, 140, ...]
-            x = torch.index_select(input=x, dim=3, index=inds)
-
-
-
-        num_samples, num_features, seq_len = x.shape
-        #print('entering forward_seq!')
-        #print('num_samples, two, num_features, seq_len', num_samples, two, num_features, seq_len)
-        #x = torch.reshape(x, (num_samples, num_features*2, seq_len)) # now x is of shape (num_samples, 2*num_features, seq_len)
-        #print(x.shape, '==', num_samples, 2*num_features, seq_len)
-        x = x.permute(1, 0, 2) # now of shape (num_features, num_samples, seq_len)
-        x = x.reshape(num_features, -1) # Now of shape (num_features, num_samples*seq_len)
-        #print(x.shape, '==', 2*num_features, num_samples*seq_len)
-        x = torch.stack(torch.split(x, self.window_size, dim=1)) # Now of shape (num_samples*(seq_len/window_size), 2*num_features, window_size)
-        #print(x.shape, '==', num_samples*(seq_len/self.window_size), 2*num_features, self.window_size)
-
-        encodings = self.forward(x) # encodings is of shape (num_samples*(seq_len/window_size), encoding_size)
-        #print(encodings.shape, '==', num_samples*(seq_len/self.window_size), self.encoding_size)
-        encodings = encodings.reshape(num_samples, int(seq_len/self.window_size), self.encoding_size)
-
-
-        return encodings
-
 
 
 def epoch_run(data, ds_estimator, auto_regressor, encoder, device, window_size, n_size=5, optimizer=None, train=True):
@@ -117,7 +30,7 @@ def epoch_run(data, ds_estimator, auto_regressor, encoder, device, window_size, 
 
     epoch_loss = 0
     acc = 0
-    for sample in data:
+    for n_i, sample in enumerate(data):
         # Recall each sample is of shape (2, num_features, signal_length)
         rnd_t = np.random.randint(5*window_size, sample.shape[-1]-5*window_size) # Choose random time in the timeseries
         sample = torch.Tensor(sample[..., max(0,(rnd_t-20*window_size)):min(sample.shape[-1], rnd_t+20*window_size)]) # sample is now redefined as being of length 40*window_size centered at rnd_t
@@ -141,15 +54,15 @@ def epoch_run(data, ds_estimator, auto_regressor, encoder, device, window_size, 
         labels = torch.Tensor([len(X_N)-1]).to(device)
         loss = torch.nn.CrossEntropyLoss()(X_N.view(1, -1), labels.long())
         epoch_loss += loss.item()
-
-        if train:
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        if n_i%20==0:
+            if train:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
     return epoch_loss / len(data), acc/(len(data))
 
 
-def learn_encoder(x, window_size, lr=0.001, decay=0, n_size=5, n_epochs=50, data='simulation', device='cpu', n_cross_val=1):
+def learn_encoder(x, window_size, encoding_size, lr=0.001, decay=0, n_size=5, n_epochs=50, data='simulation', device='cpu', n_cross_val=1):
     if not os.path.exists("./DONTCOMMITplots/%s_cpc/"%data):
         os.mkdir("./DONTCOMMITplots/%s_cpc/"%data)
     if not os.path.exists("./ckpt/%s_cpc/"%data):
@@ -157,10 +70,10 @@ def learn_encoder(x, window_size, lr=0.001, decay=0, n_size=5, n_epochs=50, data
     accuracies = []
     for cv in range(n_cross_val):
         if data == 'ICU':
-            encoding_size = 16
-            encoder = CausalCNNEncoder(in_channels=10, channels=8, depth=2, reduced_size=60, encoding_size=encoding_size, kernel_size=3, window_size=window_size, device=device)
+            #encoding_size = 16
+            encoder = CausalCNNEncoder(in_channels=10, channels=8, depth=2, reduced_size=30, encoding_size=encoding_size, kernel_size=3, window_size=window_size, device=device)
         elif 'HiRID' in data:
-            encoding_size = 10
+            #encoding_size = 10
             encoder = CausalCNNEncoder(in_channels=18, channels=4, depth=1, reduced_size=2, encoding_size=encoding_size, kernel_size=6, window_size=window_size, device=device)
         
         ds_estimator = torch.nn.Linear(encoder.encoding_size, encoder.encoding_size) # Predicts future latent data given context vector
@@ -213,13 +126,14 @@ def main(is_train, data_type, lr,  cv):
 
     if data_type == 'ICU':
         length_of_hour = int(60*60/5)
-        window_size = 120
-        encoding_size = 10
-        n_epochs = 500
+        window_size = 60
+        encoding_size = 6#16
+        n_epochs = 400
         lr = 1e-3
         pos_sample_name = 'arrest'
         path = '/datasets/sickkids/TNC_ICU_data/'
         signal_list = ["Pulse", "HR", "SpO2", "etCO2", "NBPm", "NBPd", "NBPs", "RR", "CVPm", "awRR"]
+        num_pre_positive_encodings = 12 # 6 per hr, last 2 hrs is the pre arrest window
 
         # NOTE THE MAP CHANNEL HAS 1'S FOR OBSERVED VALUES, 0'S FOR MISSING VALUES
         # data_maps arrays are of shape (num_samples, 2, 10, 5040).
@@ -230,10 +144,13 @@ def main(is_train, data_type, lr,  cv):
 
         train_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_mixed_data_maps.npy')))
         train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_mixed_labels.npy')))
+        # ******************************** TRAIN ENCODER *************************************
+        if is_train:
+            learn_encoder(train_mixed_data_maps[:,0,:,:], window_size, encoding_size=encoding_size, lr=lr, decay=1e-5, data=data_type, n_epochs=n_epochs, device=device, n_cross_val=1)
 
     elif data_type == 'HiRID':
-        window_size = 3
-        encoding_size = 10
+        window_size = 8
+        encoding_size = 6#10
         n_epochs = 300
         lr = 1e-3
         length_of_hour = int((60*60)/300) # 60 seconds * 60 / 300 (which is num seconds in 5 min)
@@ -244,15 +161,48 @@ def main(is_train, data_type, lr,  cv):
         pre_positive_window = int((24*60*60)/300) # 24 hrs
         num_pre_positive_encodings = int(pre_positive_window/window_size)
 
-        TEST_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'TEST_data_maps.npy'))).float()
-        TEST_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'TEST_labels.npy'))).float()
+        # NOTE THE MAP CHANNEL HAS 1'S FOR OBSERVED VALUES, 0'S FOR MISSING VALUES
+        # data_maps arrays are of shape (num_samples, 2, 18, 1152). 4 days of data per sample
+        TEST_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'TEST_mortality_data_maps.npy'))).float()
+        TEST_mixed_mortality_labels = torch.from_numpy(np.load(os.path.join(path, 'TEST_mortality_labels.npy'))).float()
+        TEST_mixed_labels = TEST_mixed_mortality_labels
+        #TEST_PIDs = torch.from_numpy(np.load(os.path.join(path, 'TEST_PIDs.npy'))).float()
+        TEST_Apache_Groups = torch.from_numpy(np.load(os.path.join(path, 'TEST_Apache_Groups.npy'))).float()
 
-        train_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_data_maps.npy'))).float()
-        train_mixed_labels = torch.from_numpy(np.load(os.path.join(path, 'train_labels.npy'))).float()
 
+        train_mixed_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_mortality_data_maps.npy'))).float()
+        train_mixed_mortality_labels = torch.from_numpy(np.load(os.path.join(path, 'train_mortality_labels.npy'))).float()
+        train_mixed_labels = train_mixed_mortality_labels
+        #train_PIDs = torch.from_numpy(np.load(os.path.join(path, 'train_PIDs.npy'))).float()
+        train_Apache_Groups = torch.from_numpy(np.load(os.path.join(path, 'train_Apache_Groups.npy'))).float()
+            
+        # Used for training encoder
+        train_encoder_data_maps = torch.from_numpy(np.load(os.path.join(path, 'train_encoder_data_maps.npy'))).float()
+        TEST_encoder_data_maps = torch.from_numpy(np.load(os.path.join(path, 'TEST_encoder_data_maps.npy'))).float()
 
-    if is_train:
-        learn_encoder(train_mixed_data_maps[:,0,:,:], window_size, lr=lr, decay=1e-5, data=data_type, n_epochs=n_epochs, device=device, n_cross_val=cv)
+        # Apache groups are either apache 2 or apache 4 codes. We consolodate into a single set of codes
+        #  according to mapping here: https://docs.google.com/spreadsheets/d/16IYawLlASYbCekQe2_kUKxQZrwjIe4ibkPt7UU1u5pE/edit?usp=sharing
+
+        apache_codes = [98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 190, 191, 192, 193, 197, 194, 195, 196, 198, 199, 201, 200, 202, 203, 204, 205, 206]
+        mappings = [0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 0, 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19]
+        apache_names = ['Cardiovascular', 'Pulmonary', 'Gastrointestinal', 'Neurological', 'Sepsis', 'Urogenital', 'Trauma', 'Metabolic/Endocrinology', 'Hematology', 'Other', 'Surgical Cardiovascular', 'Surgical Respiratory', 'Surgical Gastrointestinal', 'Surgical Neurological', 'Surgical Trauma', 'Surgical Urogenital', 'Surgical Gynecology', 'Surgical Orthopedics', 'Surgical others', 'Intoxication']
+        for i in range(len(apache_codes)):
+            train_Apache_Groups[torch.where(train_Apache_Groups == apache_codes[i])] = mappings[i]
+            TEST_Apache_Groups[torch.where(TEST_Apache_Groups == apache_codes[i])] = mappings[i]
+
+        # Now for any patients that did not have any code, we'll categorize that as 'other'
+        train_Apache_Groups[torch.where(train_Apache_Groups == -1)] = 9
+        TEST_Apache_Groups[torch.where(TEST_Apache_Groups == -1)] = 9
+
+        assert -1 not in train_Apache_Groups
+        assert -1 not in TEST_Apache_Groups
+
+        (unique, counts) = np.unique(train_Apache_Groups, return_counts=True)
+        (unique, counts) = np.unique(TEST_Apache_Groups, return_counts=True)
+
+        # ******************************** TRAIN ENCODER *************************************
+        if is_train:
+            learn_encoder(train_encoder_data_maps[:,0,:,:], window_size, lr=lr, encoding_size=encoding_size, decay=1e-5, data=data_type, n_epochs=n_epochs, device=device, n_cross_val=1)
 
 
     classifier_validation_aurocs = []
@@ -265,9 +215,9 @@ def main(is_train, data_type, lr,  cv):
         random.seed(seed_val)
         print("Seed set to: ", seed_val)
 
-        checkpoint = torch.load('ckpt/%s_trip/checkpoint_%d.pth.tar'%(data_type, encoder_cv))
+        checkpoint = torch.load('ckpt/%s_cpc/checkpoint_0.pth.tar'%(data_type))
         if data_type == 'ICU':
-            encoder = CausalCNNEncoder(in_channels=10, channels=8, depth=2, reduced_size=60, encoding_size=encoding_size, kernel_size=3, window_size=window_size, device=device)
+            encoder = CausalCNNEncoder(in_channels=10, channels=8, depth=2, reduced_size=30, encoding_size=encoding_size, kernel_size=3, window_size=window_size, device=device)
         elif data_type == 'HiRID':
             encoder = CausalCNNEncoder(in_channels=18, channels=4, depth=1, reduced_size=2, encoding_size=encoding_size, kernel_size=6, window_size=window_size, device=device)
         encoder.load_state_dict(checkpoint['encoder_state_dict'])
@@ -335,22 +285,22 @@ def main(is_train, data_type, lr,  cv):
 
 
         print("TRAINING LINEAR CLASSIFIER")
-        classifier_train_labels = torch.Tensor([1 in label for label in train_mixed_labels_cv]) # Sets labels for positive samples to 1
-        classifier_validation_labels = torch.Tensor([1 in label for label in validation_mixed_labels_cv]) # Sets labels for positive samples to 1
-        classifier_TEST_labels = torch.Tensor([1 in label for label in TEST_mixed_labels]) # Sets labels for positive samples to 1
+        #classifier_train_labels = torch.Tensor([1 in label for label in train_mixed_labels_cv]) # Sets labels for positive samples to 1
+        #classifier_validation_labels = torch.Tensor([1 in label for label in validation_mixed_labels_cv]) # Sets labels for positive samples to 1
+        #classifier_TEST_labels = torch.Tensor([1 in label for label in TEST_mixed_labels]) # Sets labels for positive samples to 1
 
 
-        train_mixed_data_maps_cv = train_mixed_data_maps_cv[:, 0, :, :] # Only keep data, not mask
+        #train_mixed_data_maps_cv = train_mixed_data_maps_cv[:, 0, :, :] # Only keep data, not mask
 
-        validation_mixed_data_maps_cv = validation_mixed_data_maps_cv[:, 0, :, :] # Only keep data, not mask
+        #validation_mixed_data_maps_cv = validation_mixed_data_maps_cv[:, 0, :, :] # Only keep data, not mask
 
-        TEST_mixed_data_maps = TEST_mixed_data_maps[:, 0, :, :] # Only keep data, not mask
-        rnn, classifier, valid_auroc, valid_auprc, TEST_auroc, TEST_auprc = train_linear_classifier(X_train=train_mixed_data_maps_cv, y_train=classifier_train_labels,
-                X_validation=validation_mixed_data_maps_cv, y_validation=classifier_validation_labels,
-                X_TEST=TEST_mixed_data_maps, y_TEST=classifier_TEST_labels,
-                encoding_size=encoder.encoding_size, batch_size=20, num_pre_positive_encodings=num_pre_positive_encodings,
+        #TEST_mixed_data_maps = TEST_mixed_data_maps[:, 0, :, :] # Only keep data, not mask
+        classifier, valid_auroc, valid_auprc, TEST_auroc, TEST_auprc = train_linear_classifier(X_train=train_mixed_data_maps_cv[:, 0, :, :], y_train=train_mixed_labels_cv,
+                X_validation=validation_mixed_data_maps_cv[:, 0, :, :], y_validation=validation_mixed_labels_cv,
+                X_TEST=TEST_mixed_data_maps[:, 0, :, :], y_TEST=TEST_mixed_labels, exp_type="cpc", window_size=window_size,
+                encoding_size=encoding_size, batch_size=20, num_pre_positive_encodings=num_pre_positive_encodings,
                 encoder=encoder, return_models=True, return_scores=True, pos_sample_name=pos_sample_name,
-                data_type=data_type, classification_cv=0, encoder_cv=encoder_cv)
+                data_type=data_type, classification_cv=0, encoder_cv=encoder_cv, plt_path="./DONTCOMMITplots", ckpt_path="./ckpt")
 
         classifier_validation_aurocs.append(valid_auroc)
         classifier_validation_auprcs.append(valid_auprc)

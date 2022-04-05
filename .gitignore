@@ -24,3 +24,10 @@ outputs/trip_baseline.txt
 train_cpc.sh
 train_trip.sh
 traine2e.sh
+ckpt/
+outputs/
+DONTCOMMITplots/
+circulatory_failure_plots/
+*.txt
+*.sh
+tnc/scratch3.py
