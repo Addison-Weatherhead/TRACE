@@ -1,6 +1,5 @@
 __pycache__
 grid_search.py
-tnc_for_hyper_param_optimization.py
 hyper_param_opt.sh
 trainclassifier.sh
 ckpt/HiRID_cpc/checkpoint_0.pth.tar
@@ -32,3 +31,6 @@ circulatory_failure_plots/
 *.sh
 tnc/scratch3.py
 evaluations/
+zz/0780_CausalCNNEncoder_ICU_checkpoint_0.tar
+zz/0780_encoder_checkpoint_0_Classifier_checkpoint_0.tar
+zz/load_model.py
